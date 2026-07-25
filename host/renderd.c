@@ -11,12 +11,20 @@
  * Usage:
  *   renderd --unix PATH --out DIR
  *   renderd --vsock PORT --out DIR
+ *   renderd --tcp PORT --out DIR
+ *
+ * The tcp listener binds 127.0.0.1 only. It exists for development and CI
+ * on hosts without /dev/vhost-vsock; a QEMU guest on user-mode networking
+ * reaches it via the slirp gateway 10.0.2.2, which maps to the host
+ * loopback.
  */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -248,16 +256,41 @@ static int listen_vsock(uint32_t port)
     return fd;
 }
 
+static int listen_tcp(uint16_t port)
+{
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+    };
+    int one = 1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (fd < 0) {
+        perror("renderd: socket(AF_INET)");
+        return -1;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 || listen(fd, 1) < 0) {
+        perror("renderd: bind/listen tcp");
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: renderd (--unix PATH | --vsock PORT) [--out DIR] [--once]\n");
+            "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT)"
+            " [--out DIR] [--once]\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *unix_path = NULL;
     long vsock_port = -1;
+    long tcp_port = -1;
     int once = 0;
     int lfd;
 
@@ -266,6 +299,8 @@ int main(int argc, char **argv)
             unix_path = argv[++i];
         } else if (strcmp(argv[i], "--vsock") == 0 && i + 1 < argc) {
             vsock_port = strtol(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--tcp") == 0 && i + 1 < argc) {
+            tcp_port = strtol(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             g_outdir = argv[++i];
         } else if (strcmp(argv[i], "--once") == 0) {
@@ -275,7 +310,11 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if ((unix_path == NULL) == (vsock_port < 0)) {
+    if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) != 1) {
+        usage();
+        return 2;
+    }
+    if (tcp_port >= 0 && (tcp_port == 0 || tcp_port > 65535)) {
         usage();
         return 2;
     }
@@ -286,11 +325,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    lfd = unix_path ? listen_unix(unix_path) : listen_vsock((uint32_t)vsock_port);
+    if (unix_path)
+        lfd = listen_unix(unix_path);
+    else if (vsock_port >= 0)
+        lfd = listen_vsock((uint32_t)vsock_port);
+    else
+        lfd = listen_tcp((uint16_t)tcp_port);
     if (lfd < 0)
         return 1;
     fprintf(stderr, "renderd: listening on %s\n",
-            unix_path ? unix_path : "vsock");
+            unix_path ? unix_path : (vsock_port >= 0 ? "vsock" : "tcp"));
 
     do {
         int cfd = accept(lfd, NULL, NULL);

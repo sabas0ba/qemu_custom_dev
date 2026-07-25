@@ -13,6 +13,8 @@ PROTO_SRCS := proto/rproto.c proto/rproto_io.c
 
 BINS := $(BUILD)/renderd $(BUILD)/demo $(BUILD)/test_proto $(BUILD)/ppm_check
 
+DEMO_SRCS := guest/user/demo.c guest/user/render_client.c $(PROTO_SRCS)
+
 .PHONY: all test clean
 
 all: $(BINS)
@@ -23,10 +25,13 @@ $(BUILD):
 $(BUILD)/renderd: host/renderd.c $(PROTO_SRCS) proto/rproto.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ host/renderd.c $(PROTO_SRCS)
 
-$(BUILD)/demo: guest/user/demo.c guest/user/render_client.c $(PROTO_SRCS) \
-		proto/rproto.h guest/user/render_client.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iguest/user -o $@ \
-		guest/user/demo.c guest/user/render_client.c $(PROTO_SRCS)
+$(BUILD)/demo: $(DEMO_SRCS) proto/rproto.h guest/user/render_client.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iguest/user -o $@ $(DEMO_SRCS)
+
+# Statically linked demo for running inside a guest without a toolchain
+# (shared into the VM over 9p by tests/vm-e2e.sh).
+$(BUILD)/demo-static: $(DEMO_SRCS) proto/rproto.h guest/user/render_client.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -static -Iguest/user -o $@ $(DEMO_SRCS)
 
 $(BUILD)/test_proto: tests/test_proto.c $(PROTO_SRCS) proto/rproto.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_proto.c $(PROTO_SRCS)

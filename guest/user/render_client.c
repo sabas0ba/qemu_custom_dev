@@ -1,3 +1,5 @@
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -38,6 +40,28 @@ int rc_connect_vsock(struct render_client *rc, uint32_t cid, uint32_t port)
     };
     int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
 
+    if (fd < 0)
+        return -1;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+    rc->fd = fd;
+    rc->next_seq = 1;
+    return 0;
+}
+
+int rc_connect_tcp(struct render_client *rc, const char *addr, uint16_t port)
+{
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+    };
+    int fd;
+
+    if (inet_pton(AF_INET, addr, &sa.sin_addr) != 1)
+        return -1;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
