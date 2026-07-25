@@ -49,23 +49,34 @@ E2E テストは vsock の代わりに AF_UNIX ソケットを使うため QEMU 
 
 ## Phase 1 を実機（QEMU ゲスト）で動かす
 
-1. ホストで vhost-vsock を有効化: `sudo modprobe vhost_vsock`
-2. ホストでデーモンを起動:
+ゲストは Ubuntu 24.04 cloud image + cloud-init で自動構築する
+（決定事項と詳細手順は [docs/guest-image.md](docs/guest-image.md)）。
+
+1. ゲストイメージを作成（ベースイメージは SHA256 固定で検証）:
 
    ```console
+   $ scripts/make-guest-image.sh
+   ```
+
+2. ホストで vhost-vsock を有効化し、デーモンを起動:
+
+   ```console
+   $ sudo modprobe vhost_vsock
    $ build/renderd --vsock 5000 --out .tmp/frames
    ```
 
-3. ゲストを起動（ゲストイメージは別途用意）:
+3. ゲストを起動（リポジトリは 9p で `/mnt/repo` に read-only 共有される）:
 
    ```console
-   $ IMG=/path/to/guest.qcow2 scripts/run-qemu.sh
+   $ IMG=.tmp/guest/disk.qcow2 SEED=.tmp/guest/seed.iso scripts/run-qemu.sh
    ```
 
-4. ゲスト内で `guest/user/` をビルドし、ホスト（CID 2）へ接続:
+4. ゲスト内（シリアルコンソール、`dev`/`dev`）でビルドし、ホスト
+   （CID 2）へ接続:
 
    ```console
-   guest$ ./demo --vsock 2 5000
+   guest$ cp -r /mnt/repo ~/work && cd ~/work && make
+   guest$ ./build/demo --vsock 2 5000
    ```
 
 5. ホストの `.tmp/frames/frame-000001.ppm` に描画結果が出力される。
