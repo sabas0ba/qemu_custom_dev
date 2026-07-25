@@ -18,6 +18,9 @@ struct render_client {
 /* All functions return 0 on success, -1 on failure. */
 int rc_connect_unix(struct render_client *rc, const char *path);
 int rc_connect_vsock(struct render_client *rc, uint32_t cid, uint32_t port);
+/* addr is a numeric IPv4 address. Dev/CI transport for hosts without
+ * vhost-vsock; from a guest on user-mode networking use 10.0.2.2. */
+int rc_connect_tcp(struct render_client *rc, const char *addr, uint16_t port);
 
 /* HELLO/HELLO_ACK version negotiation. Must be the first call. */
 int rc_hello(struct render_client *rc);

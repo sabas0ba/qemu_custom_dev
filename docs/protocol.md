@@ -8,6 +8,11 @@ Phase 1 では vsock（開発時は AF_UNIX）、Phase 2 以降は共有メモ�
 実装: `proto/rproto.h` / `proto/rproto.c`（コーデック）、
 `proto/rproto_io.c`（ストリーム fd 用フレーミング I/O）。
 
+輸送層は現在 3 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
+テスト用）、**TCP**（vhost-vsock が使えないコンテナ・CI 用。ゲストからは
+slirp の `10.0.2.2` でホストに届く）。いずれもプロトコル層は同一で、
+接続確立部分だけが異なる。
+
 ## 基本事項
 
 - ワイヤ上の整数はすべてリトルエンディアン。

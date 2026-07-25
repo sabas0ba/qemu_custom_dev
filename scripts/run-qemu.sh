@@ -12,7 +12,11 @@
 # Environment overrides:
 #   IMG        guest disk image (required; see scripts/make-guest-image.sh)
 #   SEED       cloud-init seed ISO, attached when set
-#   GUEST_CID  vsock CID assigned to the guest (default 3; host is always 2)
+#   GUEST_CID  vsock CID assigned to the guest (default 3; host is always 2;
+#              GUEST_CID=none disables the vsock device. It is also skipped
+#              with a warning when /dev/vhost-vsock is unavailable, so the
+#              guest can still boot on hosts without vhost-vsock, e.g.
+#              containers and CI: use the tcp transport there)
 #   MEM        guest RAM (default 2G)
 #   CPUS       vCPU count (default 2)
 #   ACCEL      accelerator (default kvm; set ACCEL=tcg without /dev/kvm)
@@ -43,10 +47,17 @@ args=(
     -m "$MEM"
     -smp "$CPUS"
     -drive file="$IMG",if=virtio
-    -device vhost-vsock-pci,guest-cid="$GUEST_CID"
     -nic user,model=virtio-net-pci
     -nographic
 )
+if [ "$GUEST_CID" = none ]; then
+    :
+elif [ -e /dev/vhost-vsock ]; then
+    args+=( -device vhost-vsock-pci,guest-cid="$GUEST_CID" )
+else
+    echo "run-qemu: /dev/vhost-vsock not available, starting without vsock" \
+         "(try: sudo modprobe vhost_vsock)" >&2
+fi
 if [ -n "$SEED" ]; then
     args+=( -drive file="$SEED",format=raw,if=virtio,readonly=on )
 fi

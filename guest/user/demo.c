@@ -7,6 +7,8 @@
  * Usage:
  *   demo --unix PATH            (local testing against renderd --unix)
  *   demo --vsock CID PORT       (from a guest; host renderd is CID 2)
+ *   demo --tcp ADDR PORT        (dev/CI; from a guest on user-mode
+ *                                networking the host is 10.0.2.2)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,8 +26,13 @@ int main(int argc, char **argv)
     } else if (argc == 4 && strcmp(argv[1], "--vsock") == 0) {
         r = rc_connect_vsock(&rc, (uint32_t)strtoul(argv[2], NULL, 10),
                              (uint32_t)strtoul(argv[3], NULL, 10));
+    } else if (argc == 4 && strcmp(argv[1], "--tcp") == 0) {
+        r = rc_connect_tcp(&rc, argv[2],
+                           (uint16_t)strtoul(argv[3], NULL, 10));
     } else {
-        fprintf(stderr, "usage: demo --unix PATH | demo --vsock CID PORT\n");
+        fprintf(stderr,
+                "usage: demo --unix PATH | demo --vsock CID PORT"
+                " | demo --tcp ADDR PORT\n");
         return 2;
     }
     if (r < 0) {

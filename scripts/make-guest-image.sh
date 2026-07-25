@@ -23,6 +23,10 @@
 #   GUEST_USER  login user name         (default dev)
 #   GUEST_PASS  login password          (default dev; local experiments only)
 #   SSH_PUBKEY  optional SSH public key string for GUEST_USER
+#   AUTORUN_CMD optional shell command run (as root) by cloud-init at the
+#               end of first boot. Used by tests/vm-e2e.sh for unattended
+#               runs. When set, package installation is skipped so the
+#               boot needs no external network access.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,6 +36,7 @@ DISK_SIZE="${DISK_SIZE:-10G}"
 GUEST_USER="${GUEST_USER:-dev}"
 GUEST_PASS="${GUEST_PASS:-dev}"
 SSH_PUBKEY="${SSH_PUBKEY:-}"
+AUTORUN_CMD="${AUTORUN_CMD:-}"
 
 # Pinned base image. Update deliberately: pick a snapshot from
 # https://cloud-images.ubuntu.com/releases/noble/ and take the matching
@@ -99,13 +104,25 @@ EOF
 ssh_pwauth: true
 chpasswd:
   expire: false
+EOF
+    if [ -z "$AUTORUN_CMD" ]; then
+        cat >> "$OUT/user-data" <<EOF
 packages:
   - build-essential
+EOF
+    fi
+    cat >> "$OUT/user-data" <<EOF
 # Mount the repo shared by run-qemu.sh (-virtfs ... mount_tag=repo).
 # nofail keeps boot working when the guest is started without the share.
 mounts:
   - [repo, /mnt/repo, 9p, "trans=virtio,version=9p2000.L,ro,nofail", "0", "0"]
 EOF
+    if [ -n "$AUTORUN_CMD" ]; then
+        cat >> "$OUT/user-data" <<EOF
+runcmd:
+  - [sh, -c, '${AUTORUN_CMD}']
+EOF
+    fi
 }
 
 make_seed() {

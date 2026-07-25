@@ -54,6 +54,24 @@ guest$ ./build/demo --vsock 2 5000
 3. `scripts/make-guest-image.sh` の `SNAPSHOT` と `BASE_SHA256` を更新して
    コミットする（更新は意図的な変更としてレビューする）。
 
+## 自動テスト（tests/vm-e2e.sh）
+
+`tests/vm-e2e.sh` は上記の手順を無人で実行する: ゲストをブートし、
+cloud-init の `runcmd` で 9p 共有内の静的リンク版デモ（`build/demo-static`）
+をゲスト内から実行してホストの `renderd` に接続、フレーム出力を
+ピクセル検証して自動 poweroff する。ゲスト内にツールチェーンも
+ネットワークも不要。
+
+- **tcp レグ（常時）**: `renderd --tcp` に slirp ゲートウェイ `10.0.2.2`
+  経由で接続。KVM も `/dev/vhost-vsock` も不要なため、コンテナや CI でも
+  動く。tcp 輸送は開発・CI 用の補助輸送層（プロトコル層は共通）。
+- **vsock レグ（可能なら）**: `/dev/vhost-vsock` がある環境（実機、
+  GitHub Actions runner で `modprobe vhost_vsock` 後）では Phase 1 本来の
+  vsock 輸送も同じブートで検証する。
+
+CI では `vm-e2e` ジョブとして毎 PR 実行される（KVM 使用、約 1 分 + 
+イメージダウンロード）。
+
 ## 制約・注意
 
 - `GUEST_PASS` は既定 `dev`。ローカルのシリアルコンソール実験専用であり、

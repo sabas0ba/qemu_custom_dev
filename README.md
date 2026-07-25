@@ -40,12 +40,14 @@ docs/           仕様・設計資料
 
 ```console
 $ make          # build/ に renderd, demo, test_proto, ppm_check を生成
-$ make test     # プロトコル単体テスト + AF_UNIX 輸送での E2E テスト
+$ make test     # プロトコル単体テスト + AF_UNIX / TCP 輸送での E2E テスト
 ```
 
-E2E テストは vsock の代わりに AF_UNIX ソケットを使うため QEMU なしで
-完結する（CI でも実行される）。プロトコル層が輸送層に依存しないことの
-検証も兼ねている。
+`make test` は QEMU なしで完結する（AF_UNIX と TCP で同一プロトコルを
+検証。輸送層非依存の確認を兼ねる）。さらに `tests/vm-e2e.sh` は実際に
+ゲストをブートし、ゲスト内からホストの renderd への描画を無人で検証する
+（CI で毎 PR 実行。`/dev/vhost-vsock` がある環境では vsock 輸送も検証。
+詳細は [docs/guest-image.md](docs/guest-image.md)）。
 
 ## Phase 1 を実機（QEMU ゲスト）で動かす
 
