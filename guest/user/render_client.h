@@ -8,10 +8,17 @@
 #ifndef RENDER_CLIENT_H
 #define RENDER_CLIENT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include "rproto_shm.h"
+
 struct render_client {
-    int fd;
+    int fd;          /* stream transports; -1 for shm */
+    int use_shm;
+    struct rshm shm;
+    void *shm_base;
+    size_t shm_size;
     uint32_t next_seq;
 };
 
@@ -21,6 +28,12 @@ int rc_connect_vsock(struct render_client *rc, uint32_t cid, uint32_t port);
 /* addr is a numeric IPv4 address. Dev/CI transport for hosts without
  * vhost-vsock; from a guest on user-mode networking use 10.0.2.2. */
 int rc_connect_tcp(struct render_client *rc, const char *addr, uint16_t port);
+/* Phase 2 shared-memory transport. _file maps a file also mapped by
+ * renderd --shm (host-side testing). _pci finds the ivshmem-plain device
+ * (1af4:1110) on the PCI bus and maps its BAR2 via sysfs resource2 —
+ * userspace driver, no kernel module; requires root in the guest. */
+int rc_connect_shm_file(struct render_client *rc, const char *path);
+int rc_connect_shm_pci(struct render_client *rc);
 
 /* HELLO/HELLO_ACK version negotiation. Must be the first call. */
 int rc_hello(struct render_client *rc);

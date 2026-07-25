@@ -12,19 +12,26 @@
  *   renderd --unix PATH --out DIR
  *   renderd --vsock PORT --out DIR
  *   renderd --tcp PORT --out DIR
+ *   renderd --shm FILE --out DIR
  *
  * The tcp listener binds 127.0.0.1 only. It exists for development and CI
  * on hosts without /dev/vhost-vsock; a QEMU guest on user-mode networking
  * reaches it via the slirp gateway 10.0.2.2, which maps to the host
  * loopback.
+ *
+ * --shm is the Phase 2 ivshmem transport: FILE is created and initialized
+ * here, handed to QEMU as a share=on memory-backend-file for
+ * ivshmem-plain, and polled for messages (no interrupts in Phase 2).
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -33,9 +40,23 @@
 #include <linux/vm_sockets.h>
 
 #include "rproto.h"
+#include "rproto_shm.h"
+
+/*
+ * Transport-independent session I/O. recv follows rproto_recv semantics
+ * (0 = got a message, 1 = peer gone / would never complete, -1 = error);
+ * send returns 0 or -1.
+ */
+struct rio {
+    int (*recv)(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
+                uint32_t cap);
+    int (*send)(void *ctx, uint32_t type, uint32_t seq,
+                const uint8_t *payload, uint32_t payload_len);
+    void *ctx;
+};
 
 struct session {
-    int fd;
+    struct rio *io;
     int hello_done;
     uint32_t width;
     uint32_t height;
@@ -94,7 +115,7 @@ static int send_status(struct session *s, uint32_t status, uint32_t seq_ref)
     struct rproto_status_msg m = { .status = status, .seq_ref = seq_ref };
     uint32_t len = rproto_enc_status(payload, &m);
 
-    return rproto_send(s->fd, RPROTO_MSG_STATUS, 0, payload, len);
+    return s->io->send(s->io->ctx, RPROTO_MSG_STATUS, 0, payload, len);
 }
 
 /* Returns the status for one client message; sets *stop on GOODBYE. */
@@ -162,9 +183,9 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
     }
 }
 
-static void serve(int cfd)
+static void serve(struct rio *io)
 {
-    struct session s = { .fd = cfd };
+    struct session s = { .io = io };
     uint8_t payload[RPROTO_MAX_PAYLOAD];
     struct rproto_hdr hdr;
     int stop = 0;
@@ -172,7 +193,7 @@ static void serve(int cfd)
     /* Session must start with HELLO / HELLO_ACK version negotiation. */
     {
         struct rproto_hello hello;
-        int r = rproto_recv(cfd, &hdr, payload, sizeof(payload));
+        int r = io->recv(io->ctx, &hdr, payload, sizeof(payload));
 
         if (r != 0)
             goto out;
@@ -192,13 +213,13 @@ static void serve(int cfd)
         uint8_t ackbuf[RPROTO_LEN_HELLO_ACK];
         uint32_t len = rproto_enc_hello_ack(ackbuf, &ack);
 
-        if (rproto_send(cfd, RPROTO_MSG_HELLO_ACK, hdr.seq, ackbuf, len) < 0)
+        if (io->send(io->ctx, RPROTO_MSG_HELLO_ACK, hdr.seq, ackbuf, len) < 0)
             goto out;
         s.hello_done = 1;
     }
 
     while (!stop) {
-        int r = rproto_recv(cfd, &hdr, payload, sizeof(payload));
+        int r = io->recv(io->ctx, &hdr, payload, sizeof(payload));
 
         if (r != 0)
             break;
@@ -209,6 +230,35 @@ static void serve(int cfd)
     }
 out:
     free(s.fb);
+}
+
+/* fd-based transports (unix / vsock / tcp) */
+static int fd_recv(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
+                   uint32_t cap)
+{
+    return rproto_recv(*(int *)ctx, hdr, payload, cap);
+}
+
+static int fd_send(void *ctx, uint32_t type, uint32_t seq,
+                   const uint8_t *payload, uint32_t payload_len)
+{
+    return rproto_send(*(int *)ctx, type, seq, payload, payload_len);
+}
+
+/* shared-memory transport: requests arrive on g2h, replies go to h2g */
+static int shm_recv(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
+                    uint32_t cap)
+{
+    return rshm_msg_recv(&((struct rshm *)ctx)->g2h, hdr, payload, cap, -1);
+}
+
+static int shm_send(void *ctx, uint32_t type, uint32_t seq,
+                    const uint8_t *payload, uint32_t payload_len)
+{
+    int r = rshm_msg_send(&((struct rshm *)ctx)->h2g, type, seq,
+                          payload, payload_len, -1);
+
+    return r == 0 ? 0 : -1;
 }
 
 static int listen_unix(const char *path)
@@ -279,16 +329,47 @@ static int listen_tcp(uint16_t port)
     return fd;
 }
 
+/* Create (or reuse) FILE, size it, map it shared, and publish the layout.
+ * QEMU maps the same file via memory-backend-file share=on. */
+static void *setup_shm(const char *path, size_t size, struct rshm *shm)
+{
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    void *base;
+
+    if (fd < 0) {
+        fprintf(stderr, "renderd: open %s: %s\n", path, strerror(errno));
+        return NULL;
+    }
+    if (ftruncate(fd, (off_t)size) < 0) {
+        perror("renderd: ftruncate");
+        close(fd);
+        return NULL;
+    }
+    base = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) {
+        perror("renderd: mmap");
+        return NULL;
+    }
+    if (rshm_init(shm, base, size) < 0) {
+        fprintf(stderr, "renderd: shm region too small\n");
+        munmap(base, size);
+        return NULL;
+    }
+    return base;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT)"
-            " [--out DIR] [--once]\n");
+            "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT |"
+            " --shm FILE) [--out DIR] [--once]\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *unix_path = NULL;
+    const char *shm_path = NULL;
     long vsock_port = -1;
     long tcp_port = -1;
     int once = 0;
@@ -301,6 +382,8 @@ int main(int argc, char **argv)
             vsock_port = strtol(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--tcp") == 0 && i + 1 < argc) {
             tcp_port = strtol(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--shm") == 0 && i + 1 < argc) {
+            shm_path = argv[++i];
         } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             g_outdir = argv[++i];
         } else if (strcmp(argv[i], "--once") == 0) {
@@ -310,7 +393,8 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) != 1) {
+    if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) +
+            (shm_path != NULL) != 1) {
         usage();
         return 2;
     }
@@ -323,6 +407,33 @@ int main(int argc, char **argv)
     if (mkdir(g_outdir, 0755) < 0 && errno != EEXIST) {
         fprintf(stderr, "renderd: mkdir %s: %s\n", g_outdir, strerror(errno));
         return 1;
+    }
+
+    if (shm_path) {
+        struct rshm shm;
+        struct rio io = { .recv = shm_recv, .send = shm_send, .ctx = &shm };
+
+        if (!setup_shm(shm_path, RSHM_DEFAULT_SIZE, &shm))
+            return 1;
+        fprintf(stderr, "renderd: serving shm region %s\n", shm_path);
+        do {
+            serve(&io);
+            /* Let the client consume the final STATUS before wiping the
+             * rings, otherwise the reply disappears under it. */
+            for (int i = 0; i < 5000 / 10; i++) {
+                uint32_t prod = __atomic_load_n(&shm.h2g.hdr->prod,
+                                                __ATOMIC_ACQUIRE);
+                uint32_t cons = __atomic_load_n(&shm.h2g.hdr->cons,
+                                                __ATOMIC_ACQUIRE);
+
+                if (prod == cons)
+                    break;
+                usleep(10 * 1000);
+            }
+            fprintf(stderr, "renderd: shm session ended\n");
+            rshm_reset_rings(&shm);
+        } while (!once);
+        return 0;
     }
 
     if (unix_path)
@@ -346,7 +457,11 @@ int main(int argc, char **argv)
             break;
         }
         fprintf(stderr, "renderd: client connected\n");
-        serve(cfd);
+        {
+            struct rio io = { .recv = fd_recv, .send = fd_send, .ctx = &cfd };
+
+            serve(&io);
+        }
         close(cfd);
         fprintf(stderr, "renderd: client disconnected\n");
     } while (!once);

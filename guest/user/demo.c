@@ -9,6 +9,10 @@
  *   demo --vsock CID PORT       (from a guest; host renderd is CID 2)
  *   demo --tcp ADDR PORT        (dev/CI; from a guest on user-mode
  *                                networking the host is 10.0.2.2)
+ *   demo --shm-file PATH        (Phase 2 shm transport over a plain file,
+ *                                against renderd --shm PATH on this host)
+ *   demo --shm-pci              (Phase 2, from a guest: map the ivshmem
+ *                                BAR2 via sysfs; requires root)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,10 +33,15 @@ int main(int argc, char **argv)
     } else if (argc == 4 && strcmp(argv[1], "--tcp") == 0) {
         r = rc_connect_tcp(&rc, argv[2],
                            (uint16_t)strtoul(argv[3], NULL, 10));
+    } else if (argc == 3 && strcmp(argv[1], "--shm-file") == 0) {
+        r = rc_connect_shm_file(&rc, argv[2]);
+    } else if (argc == 2 && strcmp(argv[1], "--shm-pci") == 0) {
+        r = rc_connect_shm_pci(&rc);
     } else {
         fprintf(stderr,
                 "usage: demo --unix PATH | demo --vsock CID PORT"
-                " | demo --tcp ADDR PORT\n");
+                " | demo --tcp ADDR PORT | demo --shm-file PATH"
+                " | demo --shm-pci\n");
         return 2;
     }
     if (r < 0) {

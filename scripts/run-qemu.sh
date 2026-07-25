@@ -22,6 +22,11 @@
 #   ACCEL      accelerator (default kvm; set ACCEL=tcg without /dev/kvm)
 #   SHARE      directory exported to the guest over 9p as tag "repo"
 #              (default: this repository; SHARE=none disables)
+#   IVSHMEM    path to a shared-memory file to expose as an ivshmem-plain
+#              PCI device (Phase 2). Create and initialize it first with
+#              `renderd --shm $IVSHMEM` so host and guest share the region.
+#   IVSHMEM_SIZE  region size, must match renderd's and be a power of two
+#              (default 4M = RSHM_DEFAULT_SIZE)
 #
 # Inside the guest, the share appears at /mnt/repo (read-only; mounted by
 # cloud-init). Build in a writable copy and connect to the host daemon:
@@ -40,6 +45,8 @@ MEM="${MEM:-2G}"
 CPUS="${CPUS:-2}"
 ACCEL="${ACCEL:-kvm}"
 SHARE="${SHARE:-$ROOT}"
+IVSHMEM="${IVSHMEM:-}"
+IVSHMEM_SIZE="${IVSHMEM_SIZE:-4M}"
 
 args=(
     -machine q35,accel="$ACCEL"
@@ -63,6 +70,14 @@ if [ -n "$SEED" ]; then
 fi
 if [ "$SHARE" != none ]; then
     args+=( -virtfs local,path="$SHARE",mount_tag=repo,security_model=none,readonly=on )
+fi
+if [ -n "$IVSHMEM" ]; then
+    [ -f "$IVSHMEM" ] || { echo "run-qemu: IVSHMEM file $IVSHMEM missing" \
+        "(start renderd --shm first)" >&2; exit 1; }
+    args+=(
+        -object memory-backend-file,id=ivshm,share=on,mem-path="$IVSHMEM",size="$IVSHMEM_SIZE"
+        -device ivshmem-plain,memdev=ivshm
+    )
 fi
 
 exec qemu-system-x86_64 "${args[@]}" "$@"
