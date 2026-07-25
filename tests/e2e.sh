@@ -71,4 +71,20 @@ trap - EXIT
 check_frame "$TMP/tcp/frame-000001.ppm"
 echo "e2e: tcp transport OK"
 
+# --- shared-memory transport (Phase 2; over a plain file, no VM) ---
+mkdir -p "$TMP/shm"
+"$BUILD/renderd" --shm "$TMP/shm/region.bin" --out "$TMP/shm" --once &
+RENDERD_PID=$!
+trap 'kill "$RENDERD_PID" 2>/dev/null || true; wait "$RENDERD_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 100); do
+    [ -f "$TMP/shm/region.bin" ] && break
+    sleep 0.05
+done
+"$BUILD/demo" --shm-file "$TMP/shm/region.bin"
+wait "$RENDERD_PID"
+trap - EXIT
+check_frame "$TMP/shm/frame-000001.ppm"
+echo "e2e: shm transport OK"
+
 echo "e2e: OK"

@@ -18,8 +18,8 @@ QEMU 上の Linux ゲストに対し、独自仮想デバイス経由でホス�
 
 | Phase | 輸送層 | ゲスト側 | 状態 |
 |-------|--------|----------|------|
-| 1 | vsock（`vhost-vsock-pci`） | 標準ソケット API | **実装中（本リポジトリの現状）** |
-| 2 | ivshmem-plain 共有メモリ | `uio_pci_generic` + ユーザ空間ドライバ、ポーリング | 未着手 |
+| 1 | vsock（`vhost-vsock-pci`） | 標準ソケット API | **完了** |
+| 2 | ivshmem-plain 共有メモリ（[docs/shm-transport.md](docs/shm-transport.md)） | BAR2 を mmap するユーザ空間ドライバ、ポーリング | **実装中（本リポジトリの現状）** |
 | 3 | ivshmem-doorbell | 自作カーネルモジュール、割り込み駆動 | 未着手 |
 
 ## リポジトリ構成
@@ -82,6 +82,10 @@ $ make test     # プロトコル単体テスト + AF_UNIX / TCP 輸送での E2
    ```
 
 5. ホストの `.tmp/frames/frame-000001.ppm` に描画結果が出力される。
+
+Phase 2（共有メモリ輸送）で動かす場合はホストで `renderd --shm` を起動し、
+`IVSHMEM=` を付けてゲストを起動、ゲスト内で `sudo ./build/demo --shm-pci`
+を実行する（詳細は [docs/shm-transport.md](docs/shm-transport.md)）。
 
 ## 開発ルール
 
