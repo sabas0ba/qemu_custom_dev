@@ -62,15 +62,34 @@ cloud-init の `runcmd` で 9p 共有内の静的リンク版デモ（`build/dem
 ピクセル検証して自動 poweroff する。ゲスト内にツールチェーンも
 ネットワークも不要。
 
+ブートは 2 回に分かれる。ivshmem-plain と ivshmem-doorbell は同じ PCI ID
+（1af4:1110）を名乗るため、1 つのゲストに両方付けるとゲスト側が区別
+できないため。
+
+**ブート 1**（`ivshmem-plain` を接続）
+
 - **tcp レグ（常時）**: `renderd --tcp` に slirp ゲートウェイ `10.0.2.2`
   経由で接続。KVM も `/dev/vhost-vsock` も不要なため、コンテナや CI でも
   動く。tcp 輸送は開発・CI 用の補助輸送層（プロトコル層は共通）。
+- **共有メモリ（ポーリング）レグ（常時）**: PCI BAR2 を mmap。ivshmem は
+  vhost 不要なのでこちらもどこでも動く。同時にレイテンシも測る。
 - **vsock レグ（可能なら）**: `/dev/vhost-vsock` がある環境（実機、
   GitHub Actions runner で `modprobe vhost_vsock` 後）では Phase 1 本来の
-  vsock 輸送も同じブートで検証する。
+  vsock 輸送も検証する。
 
-CI では `vm-e2e` ジョブとして毎 PR 実行される（KVM 使用、約 1 分 + 
-イメージダウンロード）。
+**ブート 2**（`ivshmem-doorbell` を接続）
+
+- 9p 共有内のカーネルモジュールを `insmod` し、割り込み駆動で描画 +
+  レイテンシ測定。ポーリング側の値と並べて表示される
+  （[doorbell-transport.md](doorbell-transport.md)）。
+
+各共有メモリ領域につきゲスト側セッションは 1 つだけにしている
+（`bench --scene` が測定とシーン描画を同一セッションで行う）。領域を
+セッション間で再利用するとリングのリセットと次セッションの開始が競合
+しうるため。
+
+CI では `vm-e2e` ジョブとして毎 PR 実行される（KVM 使用、2 ブートで
+数分程度）。
 
 ## 制約・注意
 
@@ -80,5 +99,8 @@ CI では `vm-e2e` ジョブとして毎 PR 実行される（KVM 使用、約 1
 - 9p 共有は read-only。ゲスト内でのビルドは書き込み可能な場所へコピーして
   行う（上記手順）。
 - KVM がないホストでは `ACCEL=tcg` で起動できるが遅い。
-- Phase 3 のカーネルモジュールは、このゲストのカーネル（Ubuntu 24.04 GA、
-  6.8 系）向けヘッダを `containers/` のビルド環境に固定する予定。
+- Phase 3 のカーネルモジュールは、このゲストのカーネル
+  （**6.8.0-134-generic**）向けヘッダでビルドする。pin は
+  `scripts/build-kmod.sh` の `KVER` と `containers/kmod-build.Dockerfile`
+  にあり、ベースイメージの更新時に一緒に更新する（vermagic が一致しないと
+  ゲストで読み込めない）。

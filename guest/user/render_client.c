@@ -1,6 +1,9 @@
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +18,7 @@
 
 #include "rproto.h"
 #include "render_client.h"
+#include "ivshmem_rproto.h"
 
 /* How long connect/handshake waits for the host side, in ms. */
 #define RC_SHM_ATTACH_TIMEOUT 5000
@@ -37,6 +41,7 @@ int rc_connect_unix(struct render_client *rc, const char *path)
     }
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
+    rc->db.fd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -58,6 +63,7 @@ int rc_connect_vsock(struct render_client *rc, uint32_t cid, uint32_t port)
     }
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
+    rc->db.fd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -81,6 +87,7 @@ int rc_connect_tcp(struct render_client *rc, const char *addr, uint16_t port)
     }
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
+    rc->db.fd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -91,6 +98,8 @@ static int rc_map_shm(struct render_client *rc, int fd, size_t size)
 
     if (base == MAP_FAILED)
         return -1;
+    memset(rc, 0, sizeof(*rc));
+    rc->db.fd = -1;
     if (rshm_attach(&rc->shm, base, size, RC_SHM_ATTACH_TIMEOUT) < 0) {
         fprintf(stderr, "render_client: no valid shm layout found"
                 " (is renderd --shm running?)\n");
@@ -102,6 +111,24 @@ static int rc_map_shm(struct render_client *rc, int fd, size_t size)
     rc->use_shm = 1;
     rc->fd = -1;
     rc->next_seq = 1;
+    return 0;
+}
+
+int rc_attach_shm(struct render_client *rc, void *base, size_t size,
+                  const struct rshm_notifier *n)
+{
+    memset(rc, 0, sizeof(*rc));
+    rc->fd = -1;
+    rc->db.fd = -1;
+    if (rshm_attach(&rc->shm, base, size, RC_SHM_ATTACH_TIMEOUT) < 0)
+        return -1;
+    rc->use_shm = 1;
+    rc->next_seq = 1;
+    /* caller owns the mapping: leave shm_base NULL so rc_close keeps it */
+    if (n) {
+        rc->notifier = *n;
+        rc->notifier_p = &rc->notifier;
+    }
     return 0;
 }
 
@@ -204,6 +231,80 @@ int rc_connect_shm_pci(struct render_client *rc)
     }
 }
 
+/* --- Phase 3: doorbell notification through the kernel module --- */
+
+static int rc_db_notify(void *ctx)
+{
+    struct rc_doorbell *db = ctx;
+
+    if (ioctl(db->fd, IVSHM_IOC_RING, &db->ring_value) < 0)
+        return -1;
+    return 0;
+}
+
+static int rc_db_wait(void *ctx, int timeout_ms)
+{
+    struct rc_doorbell *db = ctx;
+    struct pollfd pfd = { .fd = db->fd, .events = POLLIN };
+    uint32_t count;
+    int r;
+
+    do {
+        r = poll(&pfd, 1, timeout_ms);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return -1;
+    if (r == 0)
+        return 1;
+    /* Consume the event so the next wait blocks again. */
+    if (read(db->fd, &count, sizeof(count)) != (ssize_t)sizeof(count))
+        return -1;
+    return 0;
+}
+
+int rc_connect_doorbell(struct render_client *rc)
+{
+    uint64_t shm_size = 0;
+    int32_t host_id;
+    int fd = open(IVSHM_RPROTO_DEVPATH, O_RDWR);
+
+    if (fd < 0) {
+        fprintf(stderr, "render_client: cannot open %s: %s\n"
+                " (load the ivshmem_rproto module; root required)\n",
+                IVSHM_RPROTO_DEVPATH, strerror(errno));
+        return -1;
+    }
+    if (ioctl(fd, IVSHM_IOC_SHM_SIZE, &shm_size) < 0 || shm_size == 0) {
+        fprintf(stderr, "render_client: cannot query shm size\n");
+        close(fd);
+        return -1;
+    }
+    if (rc_map_shm(rc, fd, (size_t)shm_size) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    host_id = rc->shm.hdr->host_peer_id;
+    if (host_id < 0) {
+        fprintf(stderr, "render_client: host published no peer id;"
+                " is renderd running with --ivshmem?\n");
+        munmap(rc->shm_base, rc->shm_size);
+        rc->use_shm = 0;
+        close(fd);
+        return -1;
+    }
+    rc->db.fd = fd;
+    /* vector 0: the only one the driver asks the device for */
+    rc->db.ring_value = ((uint32_t)host_id << 16) | 0u;
+    rc->notifier.notify = rc_db_notify;
+    rc->notifier.wait = rc_db_wait;
+    rc->notifier.ctx = &rc->db;
+    rc->notifier_p = &rc->notifier;
+    fprintf(stderr, "render_client: doorbell transport ready"
+            " (host peer %d)\n", host_id);
+    return 0;
+}
+
 /* Send one request and wait for the matching STATUS reply. */
 static int rc_call(struct render_client *rc, uint32_t type,
                    const uint8_t *payload, uint32_t payload_len)
@@ -214,11 +315,11 @@ static int rc_call(struct render_client *rc, uint32_t type,
     uint32_t seq = rc->next_seq++;
 
     if (rc->use_shm) {
-        if (rshm_msg_send(&rc->shm.g2h, type, seq, payload, payload_len,
-                          RC_SHM_IO_TIMEOUT) != 0)
+        if (rshm_msg_send_n(&rc->shm.g2h, type, seq, payload, payload_len,
+                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
             return -1;
-        if (rshm_msg_recv(&rc->shm.h2g, &hdr, rbuf, sizeof(rbuf),
-                          RC_SHM_IO_TIMEOUT) != 0)
+        if (rshm_msg_recv_n(&rc->shm.h2g, &hdr, rbuf, sizeof(rbuf),
+                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
             return -1;
     } else {
         if (rproto_send(rc->fd, type, seq, payload, payload_len) < 0)
@@ -251,11 +352,11 @@ int rc_hello(struct render_client *rc)
     uint32_t seq = rc->next_seq++;
 
     if (rc->use_shm) {
-        if (rshm_msg_send(&rc->shm.g2h, RPROTO_MSG_HELLO, seq, buf, len,
-                          RC_SHM_IO_TIMEOUT) != 0)
+        if (rshm_msg_send_n(&rc->shm.g2h, RPROTO_MSG_HELLO, seq, buf, len,
+                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
             return -1;
-        if (rshm_msg_recv(&rc->shm.h2g, &hdr, buf, sizeof(buf),
-                          RC_SHM_IO_TIMEOUT) != 0)
+        if (rshm_msg_recv_n(&rc->shm.h2g, &hdr, buf, sizeof(buf),
+                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
             return -1;
     } else {
         if (rproto_send(rc->fd, RPROTO_MSG_HELLO, seq, buf, len) < 0)
@@ -309,10 +410,27 @@ int rc_goodbye(struct render_client *rc)
     return rc_call(rc, RPROTO_MSG_GOODBYE, NULL, 0);
 }
 
+int rc_draw_demo_scene(struct render_client *rc, uint32_t frame_id)
+{
+    if (rc_create_surface(rc, 320, 240) < 0 ||
+        rc_clear(rc, 0x102030ff) < 0 ||
+        rc_fill_rect(rc, 40, 40, 80, 60, 0xff0000ff) < 0 ||
+        rc_fill_rect(rc, 160, 120, 100, 80, 0x00ff00ff) < 0 ||
+        rc_present(rc, frame_id) < 0)
+        return -1;
+    return 0;
+}
+
 void rc_close(struct render_client *rc)
 {
+    if (rc->db.fd >= 0) {
+        close(rc->db.fd);
+        rc->db.fd = -1;
+        rc->notifier_p = NULL;
+    }
     if (rc->use_shm) {
-        munmap(rc->shm_base, rc->shm_size);
+        if (rc->shm_base)
+            munmap(rc->shm_base, rc->shm_size);
         rc->shm_base = NULL;
         rc->use_shm = 0;
     }
@@ -320,4 +438,37 @@ void rc_close(struct render_client *rc)
         close(rc->fd);
         rc->fd = -1;
     }
+}
+
+static const char *g_transport_usage =
+    "--unix PATH | --vsock CID PORT | --tcp ADDR PORT"
+    " | --shm-file PATH | --shm-pci | --doorbell";
+
+const char *rc_transport_usage(void)
+{
+    return g_transport_usage;
+}
+
+int rc_connect_argv(struct render_client *rc, int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[0], "--unix") == 0)
+        return rc_connect_unix(rc, argv[1]) == 0 ? 2 : -1;
+    if (argc >= 3 && strcmp(argv[0], "--vsock") == 0)
+        return rc_connect_vsock(rc, (uint32_t)strtoul(argv[1], NULL, 10),
+                                (uint32_t)strtoul(argv[2], NULL, 10)) == 0
+               ? 3 : -1;
+    if (argc >= 3 && strcmp(argv[0], "--tcp") == 0)
+        return rc_connect_tcp(rc, argv[1],
+                              (uint16_t)strtoul(argv[2], NULL, 10)) == 0
+               ? 3 : -1;
+    if (argc >= 2 && strcmp(argv[0], "--shm-file") == 0)
+        return rc_connect_shm_file(rc, argv[1]) == 0 ? 2 : -1;
+    if (argc >= 1 && strcmp(argv[0], "--shm-pci") == 0)
+        return rc_connect_shm_pci(rc) == 0 ? 1 : -1;
+    if (argc >= 1 && strcmp(argv[0], "--doorbell") == 0)
+        return rc_connect_doorbell(rc) == 0 ? 1 : -1;
+
+    fprintf(stderr, "render_client: expected a transport: %s\n",
+            g_transport_usage);
+    return -1;
 }

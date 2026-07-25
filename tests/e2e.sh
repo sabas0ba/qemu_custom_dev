@@ -87,4 +87,34 @@ trap - EXIT
 check_frame "$TMP/shm/frame-000001.ppm"
 echo "e2e: shm transport OK"
 
+# --- doorbell transport (Phase 3; ivshmem server + eventfds, no VM) ---
+# ivshmem_peer stands in for the guest: same rings and notifier contract,
+# but the eventfds come from the server rather than through the kernel
+# module. The driver itself is covered by tests/vm-e2e.sh.
+mkdir -p "$TMP/doorbell"
+IVSOCK="$TMP/doorbell/ivshmem.sock"
+"$BUILD/ivshmemd" --socket "$IVSOCK" --shm "$TMP/doorbell/region.bin" \
+    --size 4194304 &
+IVD_PID=$!
+trap 'kill "$IVD_PID" 2>/dev/null || true; wait "$IVD_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 100); do
+    [ -S "$IVSOCK" ] && break
+    sleep 0.05
+done
+[ -S "$IVSOCK" ] || { echo "e2e: ivshmemd did not create socket" >&2; exit 1; }
+
+"$BUILD/renderd" --ivshmem "$IVSOCK" --out "$TMP/doorbell" --once &
+RENDERD_PID=$!
+trap 'kill "$RENDERD_PID" "$IVD_PID" 2>/dev/null || true;
+      wait "$RENDERD_PID" "$IVD_PID" 2>/dev/null || true' EXIT
+
+"$BUILD/ivshmem_peer" --socket "$IVSOCK"
+wait "$RENDERD_PID"
+kill "$IVD_PID" 2>/dev/null || true
+wait "$IVD_PID" 2>/dev/null || true
+trap - EXIT
+check_frame "$TMP/doorbell/frame-000001.ppm"
+echo "e2e: doorbell transport OK"
+
 echo "e2e: OK"

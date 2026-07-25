@@ -27,6 +27,14 @@
 #              `renderd --shm $IVSHMEM` so host and guest share the region.
 #   IVSHMEM_SIZE  region size, must match renderd's and be a power of two
 #              (default 4M = RSHM_DEFAULT_SIZE)
+#   IVSHMEM_SOCKET  path to an ivshmem server socket to attach as an
+#              ivshmem-doorbell PCI device (Phase 3). Start host/ivshmemd
+#              on that socket first; the region and the interrupt eventfds
+#              both come from the server. Do not combine with IVSHMEM:
+#              two ivshmem devices share one PCI ID, which leaves the
+#              guest unable to tell them apart.
+#   IVSHMEM_VECTORS  MSI-X vectors on that device, must match the server's
+#              --vectors (default 1)
 #
 # Inside the guest, the share appears at /mnt/repo (read-only; mounted by
 # cloud-init). Build in a writable copy and connect to the host daemon:
@@ -47,6 +55,8 @@ ACCEL="${ACCEL:-kvm}"
 SHARE="${SHARE:-$ROOT}"
 IVSHMEM="${IVSHMEM:-}"
 IVSHMEM_SIZE="${IVSHMEM_SIZE:-4M}"
+IVSHMEM_SOCKET="${IVSHMEM_SOCKET:-}"
+IVSHMEM_VECTORS="${IVSHMEM_VECTORS:-1}"
 
 args=(
     -machine q35,accel="$ACCEL"
@@ -71,12 +81,24 @@ fi
 if [ "$SHARE" != none ]; then
     args+=( -virtfs local,path="$SHARE",mount_tag=repo,security_model=none,readonly=on )
 fi
+if [ -n "$IVSHMEM" ] && [ -n "$IVSHMEM_SOCKET" ]; then
+    echo "run-qemu: set only one of IVSHMEM and IVSHMEM_SOCKET" >&2
+    exit 1
+fi
 if [ -n "$IVSHMEM" ]; then
     [ -f "$IVSHMEM" ] || { echo "run-qemu: IVSHMEM file $IVSHMEM missing" \
         "(start renderd --shm first)" >&2; exit 1; }
     args+=(
         -object memory-backend-file,id=ivshm,share=on,mem-path="$IVSHMEM",size="$IVSHMEM_SIZE"
         -device ivshmem-plain,memdev=ivshm
+    )
+fi
+if [ -n "$IVSHMEM_SOCKET" ]; then
+    [ -S "$IVSHMEM_SOCKET" ] || { echo "run-qemu: no ivshmem server socket at" \
+        "$IVSHMEM_SOCKET (start ivshmemd first)" >&2; exit 1; }
+    args+=(
+        -chardev socket,path="$IVSHMEM_SOCKET",id=ivshmem_db
+        -device ivshmem-doorbell,chardev=ivshmem_db,vectors="$IVSHMEM_VECTORS"
     )
 fi
 

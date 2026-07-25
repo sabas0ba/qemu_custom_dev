@@ -37,7 +37,7 @@
 #include "rproto.h"
 
 #define RSHM_MAGIC        0x30534456u /* "VDS0" in little-endian byte order */
-#define RSHM_VERSION      1u
+#define RSHM_VERSION      2u
 
 /* Default region layout: 4 MiB total (ivshmem BAR sizes must be powers of
  * two), two 256 KiB rings, remainder reserved for a future framebuffer. */
@@ -54,6 +54,13 @@ struct rshm_hdr {
     uint32_t h2g_size;
     uint32_t fb_off;
     uint32_t fb_size;
+    /*
+     * Phase 3: the ivshmem peer ID of the host side, so the guest knows
+     * which peer to ring the doorbell on. -1 when notification is not in
+     * use (Phase 2 polling). Published together with the rest of the
+     * layout, before the magic.
+     */
+    int32_t host_peer_id;
 };
 
 /* prod and cons live on separate cache lines to avoid false sharing.
@@ -86,9 +93,29 @@ struct rshm {
  * rshm_reset_rings: reset both rings to empty (host side, between
  * sessions; callers must ensure no peer is mid-operation).
  */
-int rshm_init(struct rshm *s, void *base, size_t size);
+int rshm_init(struct rshm *s, void *base, size_t size, int32_t host_peer_id);
 int rshm_attach(struct rshm *s, void *base, size_t size, int timeout_ms);
 void rshm_reset_rings(struct rshm *s);
+
+/*
+ * Optional out-of-band notification (Phase 3). Without one, waiting for a
+ * message means polling the ring (Phase 2). With one, the sender signals
+ * the peer after publishing and the receiver blocks until signalled —
+ * which is what the ivshmem doorbell provides.
+ *
+ * There is no lost-wakeup window: receivers always inspect the ring
+ * before blocking, and both backing mechanisms (eventfd on the host, the
+ * driver's interrupt counter in the guest) latch a signal that arrives
+ * while the receiver is not yet waiting.
+ *
+ * notify: signal the peer, 0 or -1.
+ * wait: 0 when signalled, 1 on timeout, -1 on error.
+ */
+struct rshm_notifier {
+    int (*notify)(void *ctx);
+    int (*wait)(void *ctx, int timeout_ms);
+    void *ctx;
+};
 
 /*
  * Message transfer. A message (12-byte header + payload, same wire format
@@ -108,5 +135,18 @@ int rshm_msg_send(struct rshm_ring *r, uint32_t type, uint32_t seq,
                   int timeout_ms);
 int rshm_msg_recv(struct rshm_ring *r, struct rproto_hdr *hdr,
                   uint8_t *payload, uint32_t cap, int timeout_ms);
+
+/*
+ * As above, but signalling through *n when it is non-NULL (a NULL
+ * notifier makes these behave exactly like the polling variants).
+ * Waiting for ring space always polls: space is freed by the peer
+ * consuming messages, which the request/response protocol bounds anyway.
+ */
+int rshm_msg_send_n(struct rshm_ring *r, uint32_t type, uint32_t seq,
+                    const uint8_t *payload, uint32_t payload_len,
+                    int timeout_ms, const struct rshm_notifier *n);
+int rshm_msg_recv_n(struct rshm_ring *r, struct rproto_hdr *hdr,
+                    uint8_t *payload, uint32_t cap, int timeout_ms,
+                    const struct rshm_notifier *n);
 
 #endif /* RPROTO_SHM_H */

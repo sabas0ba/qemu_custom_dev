@@ -22,6 +22,12 @@
  * --shm is the Phase 2 ivshmem transport: FILE is created and initialized
  * here, handed to QEMU as a share=on memory-backend-file for
  * ivshmem-plain, and polled for messages (no interrupts in Phase 2).
+ *
+ * --ivshmem is the Phase 3 doorbell transport: we join SOCKET as a peer of
+ * an ivshmem server (host/ivshmemd), which also hands the shared memory
+ * and the notification eventfds to QEMU's ivshmem-doorbell device. Same
+ * rings as --shm, but each side is woken by an interrupt instead of
+ * spinning on the ring.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -39,6 +45,7 @@
 
 #include <linux/vm_sockets.h>
 
+#include "ivshmem.h"
 #include "rproto.h"
 #include "rproto_shm.h"
 
@@ -245,20 +252,49 @@ static int fd_send(void *ctx, uint32_t type, uint32_t seq,
     return rproto_send(*(int *)ctx, type, seq, payload, payload_len);
 }
 
-/* shared-memory transport: requests arrive on g2h, replies go to h2g */
+/*
+ * Shared-memory transport: requests arrive on g2h, replies go to h2g.
+ * With a notifier attached (Phase 3) the waits become interrupt-driven;
+ * without one (Phase 2) they poll.
+ */
+struct shm_io {
+    struct rshm *shm;
+    const struct rshm_notifier *notifier;
+};
+
 static int shm_recv(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
                     uint32_t cap)
 {
-    return rshm_msg_recv(&((struct rshm *)ctx)->g2h, hdr, payload, cap, -1);
+    struct shm_io *io = ctx;
+
+    return rshm_msg_recv_n(&io->shm->g2h, hdr, payload, cap, -1,
+                           io->notifier);
 }
 
 static int shm_send(void *ctx, uint32_t type, uint32_t seq,
                     const uint8_t *payload, uint32_t payload_len)
 {
-    int r = rshm_msg_send(&((struct rshm *)ctx)->h2g, type, seq,
-                          payload, payload_len, -1);
+    struct shm_io *io = ctx;
+    int r = rshm_msg_send_n(&io->shm->h2g, type, seq, payload, payload_len,
+                            -1, io->notifier);
 
     return r == 0 ? 0 : -1;
+}
+
+/* Phase 3 notification, backed by the ivshmem server's eventfds. */
+static int db_notify(void *ctx)
+{
+    struct ivshmem_client *cli = ctx;
+    int64_t peer = ivshmem_client_first_peer(cli);
+
+    if (peer == IVSHMEM_NO_PEER)
+        return -1;
+    return ivshmem_client_notify(cli, peer, 0);
+}
+
+static int db_wait(void *ctx, int timeout_ms)
+{
+    return ivshmem_client_wait_irq(ctx, 0, timeout_ms);
 }
 
 static int listen_unix(const char *path)
@@ -351,7 +387,7 @@ static void *setup_shm(const char *path, size_t size, struct rshm *shm)
         perror("renderd: mmap");
         return NULL;
     }
-    if (rshm_init(shm, base, size) < 0) {
+    if (rshm_init(shm, base, size, -1) < 0) {
         fprintf(stderr, "renderd: shm region too small\n");
         munmap(base, size);
         return NULL;
@@ -359,17 +395,34 @@ static void *setup_shm(const char *path, size_t size, struct rshm *shm)
     return base;
 }
 
+/*
+ * Wait until the reply ring has drained, so a session's last STATUS is
+ * not wiped by the reset that follows it.
+ */
+static void drain_replies(struct rshm *shm)
+{
+    for (int i = 0; i < 500; i++) {
+        uint32_t prod = __atomic_load_n(&shm->h2g.hdr->prod, __ATOMIC_ACQUIRE);
+        uint32_t cons = __atomic_load_n(&shm->h2g.hdr->cons, __ATOMIC_ACQUIRE);
+
+        if (prod == cons)
+            return;
+        usleep(10 * 1000);
+    }
+}
+
 static void usage(void)
 {
     fprintf(stderr,
             "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT |"
-            " --shm FILE) [--out DIR] [--once]\n");
+            " --shm FILE | --ivshmem SOCKET) [--out DIR] [--once]\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *unix_path = NULL;
     const char *shm_path = NULL;
+    const char *ivshmem_path = NULL;
     long vsock_port = -1;
     long tcp_port = -1;
     int once = 0;
@@ -384,6 +437,8 @@ int main(int argc, char **argv)
             tcp_port = strtol(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--shm") == 0 && i + 1 < argc) {
             shm_path = argv[++i];
+        } else if (strcmp(argv[i], "--ivshmem") == 0 && i + 1 < argc) {
+            ivshmem_path = argv[++i];
         } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             g_outdir = argv[++i];
         } else if (strcmp(argv[i], "--once") == 0) {
@@ -394,7 +449,7 @@ int main(int argc, char **argv)
         }
     }
     if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) +
-            (shm_path != NULL) != 1) {
+            (shm_path != NULL) + (ivshmem_path != NULL) != 1) {
         usage();
         return 2;
     }
@@ -411,28 +466,66 @@ int main(int argc, char **argv)
 
     if (shm_path) {
         struct rshm shm;
-        struct rio io = { .recv = shm_recv, .send = shm_send, .ctx = &shm };
+        struct shm_io sio = { .shm = &shm, .notifier = NULL };
+        struct rio io = { .recv = shm_recv, .send = shm_send, .ctx = &sio };
 
         if (!setup_shm(shm_path, RSHM_DEFAULT_SIZE, &shm))
             return 1;
         fprintf(stderr, "renderd: serving shm region %s\n", shm_path);
         do {
             serve(&io);
-            /* Let the client consume the final STATUS before wiping the
-             * rings, otherwise the reply disappears under it. */
-            for (int i = 0; i < 5000 / 10; i++) {
-                uint32_t prod = __atomic_load_n(&shm.h2g.hdr->prod,
-                                                __ATOMIC_ACQUIRE);
-                uint32_t cons = __atomic_load_n(&shm.h2g.hdr->cons,
-                                                __ATOMIC_ACQUIRE);
-
-                if (prod == cons)
-                    break;
-                usleep(10 * 1000);
-            }
+            drain_replies(&shm);
             fprintf(stderr, "renderd: shm session ended\n");
             rshm_reset_rings(&shm);
         } while (!once);
+        return 0;
+    }
+
+    if (ivshmem_path) {
+        struct ivshmem_client cli;
+        struct rshm shm;
+        struct rshm_notifier notifier = {
+            .notify = db_notify, .wait = db_wait, .ctx = &cli,
+        };
+        struct shm_io sio = { .shm = &shm, .notifier = &notifier };
+        struct rio io = { .recv = shm_recv, .send = shm_send, .ctx = &sio };
+        struct stat st;
+        void *base;
+
+        if (ivshmem_client_connect(&cli, ivshmem_path) < 0) {
+            fprintf(stderr, "renderd: cannot join ivshmem server %s\n",
+                    ivshmem_path);
+            return 1;
+        }
+        if (fstat(cli.shm_fd, &st) < 0 || st.st_size <= 0) {
+            perror("renderd: fstat ivshmem region");
+            ivshmem_client_close(&cli);
+            return 1;
+        }
+        base = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, cli.shm_fd, 0);
+        if (base == MAP_FAILED) {
+            perror("renderd: mmap ivshmem region");
+            ivshmem_client_close(&cli);
+            return 1;
+        }
+        /* Publish our peer ID with the layout: the guest needs it to aim
+         * the doorbell back at us. */
+        if (rshm_init(&shm, base, (size_t)st.st_size, (int32_t)cli.id) < 0) {
+            fprintf(stderr, "renderd: ivshmem region too small\n");
+            ivshmem_client_close(&cli);
+            return 1;
+        }
+        fprintf(stderr, "renderd: joined %s as peer %lld,"
+                " %lld bytes shared, doorbell-driven\n",
+                ivshmem_path, (long long)cli.id, (long long)st.st_size);
+        do {
+            serve(&io);
+            drain_replies(&shm);
+            fprintf(stderr, "renderd: ivshmem session ended\n");
+            rshm_reset_rings(&shm);
+        } while (!once);
+        ivshmem_client_close(&cli);
         return 0;
     }
 

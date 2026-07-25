@@ -28,7 +28,7 @@ static void ring_setup(struct rshm_ring *r, uint8_t *base, uint32_t off,
     r->size = size;
 }
 
-int rshm_init(struct rshm *s, void *base, size_t size)
+int rshm_init(struct rshm *s, void *base, size_t size, int32_t host_peer_id)
 {
     uint8_t *b = base;
     uint32_t ring_span = (uint32_t)sizeof(struct rshm_ring_hdr) + RSHM_RING_SIZE;
@@ -51,6 +51,7 @@ int rshm_init(struct rshm *s, void *base, size_t size)
     s->hdr->h2g_size = RSHM_RING_SIZE;
     s->hdr->fb_off = fb_off;
     s->hdr->fb_size = (uint32_t)size - fb_off;
+    s->hdr->host_peer_id = host_peer_id;
     ring_setup(&s->g2h, b, g2h_off, RSHM_RING_SIZE);
     ring_setup(&s->h2g, b, h2g_off, RSHM_RING_SIZE);
 
@@ -171,15 +172,21 @@ int rshm_msg_try_recv(struct rshm_ring *r, struct rproto_hdr *hdr,
     return 0;
 }
 
-int rshm_msg_send(struct rshm_ring *r, uint32_t type, uint32_t seq,
-                  const uint8_t *payload, uint32_t payload_len,
-                  int timeout_ms)
+int rshm_msg_send_n(struct rshm_ring *r, uint32_t type, uint32_t seq,
+                    const uint8_t *payload, uint32_t payload_len,
+                    int timeout_ms, const struct rshm_notifier *n)
 {
     long polls = timeout_polls(timeout_ms);
 
     for (;;) {
         int rc = rshm_msg_try_send(r, type, seq, payload, payload_len);
 
+        if (rc == 0) {
+            /* published; only now may the peer be told to look */
+            if (n && n->notify && n->notify(n->ctx) < 0)
+                return -1;
+            return 0;
+        }
         if (rc != 1)
             return rc;
         if (polls == 0)
@@ -190,11 +197,34 @@ int rshm_msg_send(struct rshm_ring *r, uint32_t type, uint32_t seq,
     }
 }
 
-int rshm_msg_recv(struct rshm_ring *r, struct rproto_hdr *hdr,
-                  uint8_t *payload, uint32_t cap, int timeout_ms)
+int rshm_msg_recv_n(struct rshm_ring *r, struct rproto_hdr *hdr,
+                    uint8_t *payload, uint32_t cap, int timeout_ms,
+                    const struct rshm_notifier *n)
 {
-    long polls = timeout_polls(timeout_ms);
+    long polls;
+    int left = timeout_ms;
 
+    if (n && n->wait) {
+        for (;;) {
+            int rc = rshm_msg_try_recv(r, hdr, payload, cap);
+            int wr;
+
+            if (rc != 1)
+                return rc;
+            /* Ring empty: block until the peer rings, in bounded steps so
+             * a lost signal cannot wedge us forever. */
+            wr = n->wait(n->ctx, left < 0 ? 1000 : (left < 1000 ? left : 1000));
+            if (wr < 0)
+                return -1;
+            if (wr == 1 && left >= 0) {
+                left -= left < 1000 ? left : 1000;
+                if (left == 0)
+                    return 1;
+            }
+        }
+    }
+
+    polls = timeout_polls(timeout_ms);
     for (;;) {
         int rc = rshm_msg_try_recv(r, hdr, payload, cap);
 
@@ -206,4 +236,18 @@ int rshm_msg_recv(struct rshm_ring *r, struct rproto_hdr *hdr,
             polls--;
         poll_pause();
     }
+}
+
+int rshm_msg_send(struct rshm_ring *r, uint32_t type, uint32_t seq,
+                  const uint8_t *payload, uint32_t payload_len,
+                  int timeout_ms)
+{
+    return rshm_msg_send_n(r, type, seq, payload, payload_len, timeout_ms,
+                           NULL);
+}
+
+int rshm_msg_recv(struct rshm_ring *r, struct rproto_hdr *hdr,
+                  uint8_t *payload, uint32_t cap, int timeout_ms)
+{
+    return rshm_msg_recv_n(r, hdr, payload, cap, timeout_ms, NULL);
 }
