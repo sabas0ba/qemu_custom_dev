@@ -1,0 +1,6 @@
+# Build outputs
+build/
+*.o
+
+# Working directory for temporary files (repo policy: keep temp files here)
+.tmp/
