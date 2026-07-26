@@ -145,6 +145,21 @@ static void test_present_status_roundtrip(void)
     CHECK(sout.status == RPROTO_ST_ERR_ARG && sout.seq_ref == 99);
 }
 
+static void test_blit_roundtrip(void)
+{
+    uint8_t buf[RPROTO_LEN_BLIT];
+    struct rproto_blit in = { .src_off = 4096, .stride = 320,
+                              .x = 10, .y = 20, .w = 30, .h = 40 };
+    struct rproto_blit out;
+
+    CHECK(rproto_enc_blit(buf, &in) == RPROTO_LEN_BLIT);
+    CHECK(rproto_dec_blit(buf, RPROTO_LEN_BLIT, &out) == 0);
+    CHECK(out.src_off == 4096 && out.stride == 320);
+    CHECK(out.x == 10 && out.y == 20 && out.w == 30 && out.h == 40);
+    CHECK(rproto_dec_blit(buf, RPROTO_LEN_BLIT - 1, &out) == -1);
+    CHECK(rproto_dec_blit(buf, RPROTO_LEN_BLIT + 1, &out) == -1);
+}
+
 int main(void)
 {
     test_hdr_roundtrip();
@@ -156,6 +171,7 @@ int main(void)
     test_clear_roundtrip();
     test_fill_rect_roundtrip();
     test_present_status_roundtrip();
+    test_blit_roundtrip();
 
     if (g_failures) {
         fprintf(stderr, "test_proto: %d failure(s)\n", g_failures);

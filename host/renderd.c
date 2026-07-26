@@ -61,6 +61,13 @@ struct rio {
     int (*send)(void *ctx, uint32_t type, uint32_t seq,
                 const uint8_t *payload, uint32_t payload_len);
     void *ctx;
+    /*
+     * Staging area for BLIT: the part of the shared region the client
+     * writes pixels into. NULL on the stream transports, which have no
+     * shared memory and therefore no BLIT.
+     */
+    const uint8_t *staging;
+    uint32_t staging_size;
 };
 
 struct session {
@@ -85,6 +92,33 @@ static void fb_fill_rect(struct session *s, uint32_t x, uint32_t y,
     for (uint32_t row = y; row < y + h; row++)
         for (uint32_t col = x; col < x + w; col++)
             s->fb[(size_t)row * s->width + col] = rgba;
+}
+
+/*
+ * Copy a rectangle of R,G,B,A bytes out of the staging area into the
+ * surface, clipped to it. The caller has already checked that the source
+ * extent is inside the staging area.
+ */
+static void fb_blit(struct session *s, const struct rproto_blit *m)
+{
+    const uint8_t *src = s->io->staging + m->src_off;
+    uint32_t w = m->w;
+    uint32_t h = m->h;
+
+    if (m->x >= s->width || m->y >= s->height)
+        return;
+    if (w > s->width - m->x)
+        w = s->width - m->x;
+    if (h > s->height - m->y)
+        h = s->height - m->y;
+    for (uint32_t row = 0; row < h; row++) {
+        const uint8_t *sp = src + (size_t)row * m->stride;
+        uint32_t *dp = s->fb + (size_t)(m->y + row) * s->width + m->x;
+
+        for (uint32_t col = 0; col < w; col++, sp += 4)
+            dp[col] = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) |
+                      ((uint32_t)sp[2] << 8) | (uint32_t)sp[3];
+    }
 }
 
 static int write_ppm(const struct session *s, uint32_t frame_id)
@@ -168,6 +202,33 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
         if (rproto_dec_fill_rect(payload, hdr->payload_len, &m) < 0)
             return RPROTO_ST_ERR_PROTO;
         fb_fill_rect(s, m.x, m.y, m.w, m.h, m.rgba);
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_BLIT: {
+        struct rproto_blit m;
+        uint64_t row_bytes, extent;
+
+        if (!s->fb)
+            return RPROTO_ST_ERR_STATE;
+        if (!s->io->staging)
+            return RPROTO_ST_ERR_STATE; /* no shared region on this transport */
+        if (rproto_dec_blit(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        if (m.w == 0 || m.h == 0 ||
+            m.w > RPROTO_MAX_DIM || m.h > RPROTO_MAX_DIM)
+            return RPROTO_ST_ERR_ARG;
+        /*
+         * The client picks src_off, stride and the extent, so bound the
+         * whole source rectangle against the staging area in 64 bits
+         * before reading a single byte of it.
+         */
+        row_bytes = (uint64_t)m.w * 4;
+        if (m.stride < row_bytes)
+            return RPROTO_ST_ERR_ARG;
+        extent = (uint64_t)(m.h - 1) * m.stride + row_bytes;
+        if ((uint64_t)m.src_off + extent > s->io->staging_size)
+            return RPROTO_ST_ERR_ARG;
+        fb_blit(s, &m);
         return RPROTO_ST_OK;
     }
     case RPROTO_MSG_PRESENT: {
@@ -472,6 +533,8 @@ int main(int argc, char **argv)
 
         if (!setup_shm(shm_path, RSHM_DEFAULT_SIZE, &shm))
             return 1;
+        io.staging = (const uint8_t *)shm.hdr + shm.hdr->fb_off;
+        io.staging_size = shm.hdr->fb_size;
         fprintf(stderr, "renderd: serving shm region %s\n", shm_path);
         do {
             serve(&io);
@@ -517,6 +580,8 @@ int main(int argc, char **argv)
             ivshmem_client_close(&cli);
             return 1;
         }
+        io.staging = (const uint8_t *)shm.hdr + shm.hdr->fb_off;
+        io.staging_size = shm.hdr->fb_size;
         fprintf(stderr, "renderd: joined %s as peer %lld,"
                 " %lld bytes shared, doorbell-driven\n",
                 ivshmem_path, (long long)cli.id, (long long)st.st_size);

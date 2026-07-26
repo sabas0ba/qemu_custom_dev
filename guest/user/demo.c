@@ -14,6 +14,10 @@
  *   demo --shm-file PATH        (Phase 2 shm transport over a plain file)
  *   demo --shm-pci              (Phase 2, from a guest, polled)
  *   demo --doorbell             (Phase 3, from a guest, interrupt-driven)
+ *
+ * With a trailing --blit the same scene is composited from pixels staged
+ * in shared memory (protocol v0.2) rather than drawn with FILL_RECT; the
+ * resulting frame is identical. Shared-memory transports only.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,17 +31,23 @@ int main(int argc, char **argv)
     int used = rc_connect_argv(&rc, argc - 1, argv + 1);
 
     if (used < 0) {
-        fprintf(stderr, "usage: demo %s\n", rc_transport_usage());
+        fprintf(stderr, "usage: demo %s [--blit]\n", rc_transport_usage());
         return argc > 1 ? 1 : 2;
     }
-    if (used + 1 != argc) {
-        fprintf(stderr, "demo: unexpected extra arguments\n");
-        rc_close(&rc);
-        return 2;
+    int blit = 0;
+
+    for (int i = used + 1; i < argc; i++) {
+        if (strcmp(argv[i], "--blit") == 0) {
+            blit = 1;
+        } else {
+            fprintf(stderr, "demo: unexpected argument %s\n", argv[i]);
+            rc_close(&rc);
+            return 2;
+        }
     }
 
     if (rc_hello(&rc) < 0 ||
-        rc_draw_demo_scene(&rc, 1) < 0 ||
+        (blit ? rc_draw_blit_scene(&rc, 1) : rc_draw_demo_scene(&rc, 1)) < 0 ||
         rc_goodbye(&rc) < 0) {
         fprintf(stderr, "demo: protocol error\n");
         rc_close(&rc);

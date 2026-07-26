@@ -88,6 +88,45 @@ trap - EXIT
 check_frame "$TMP/shm/frame-000001.ppm"
 echo "e2e: shm transport OK"
 
+# --- BLIT over shared memory (protocol v0.2) ---
+# The zero-copy path must land exactly the pixels the command path does,
+# so the frame is compared byte for byte against the run above.
+mkdir -p "$TMP/blit"
+"$BUILD/renderd" --shm "$TMP/blit/region.bin" --out "$TMP/blit" --once &
+RENDERD_PID=$!
+trap 'kill "$RENDERD_PID" 2>/dev/null || true; wait "$RENDERD_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 100); do
+    [ -f "$TMP/blit/region.bin" ] && break
+    sleep 0.05
+done
+"$BUILD/demo" --shm-file "$TMP/blit/region.bin" --blit
+wait "$RENDERD_PID"
+trap - EXIT
+check_frame "$TMP/blit/frame-000001.ppm"
+cmp "$TMP/blit/frame-000001.ppm" "$TMP/shm/frame-000001.ppm"
+echo "e2e: blit matches the command-drawn frame OK"
+
+# BLIT is a shared-memory capability; asking for it over a stream
+# transport has to fail rather than half-work.
+mkdir -p "$TMP/blit-reject"
+"$BUILD/renderd" --unix "$TMP/blit-reject/sock" --out "$TMP/blit-reject" --once &
+RENDERD_PID=$!
+trap 'kill "$RENDERD_PID" 2>/dev/null || true; wait "$RENDERD_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 100); do
+    [ -S "$TMP/blit-reject/sock" ] && break
+    sleep 0.05
+done
+if "$BUILD/demo" --unix "$TMP/blit-reject/sock" --blit 2>/dev/null; then
+    echo "e2e: BLIT should not be accepted over a stream transport" >&2
+    exit 1
+fi
+kill "$RENDERD_PID" 2>/dev/null || true
+wait "$RENDERD_PID" 2>/dev/null || true
+trap - EXIT
+echo "e2e: blit rejected on stream transport OK"
+
 # --- doorbell transport (Phase 3; ivshmem server + eventfds, no VM) ---
 # ivshmem_peer stands in for the guest: same rings and notifier contract,
 # but the eventfds come from the server rather than through the kernel

@@ -20,17 +20,23 @@ QEMU 上の Linux ゲストに対し、独自仮想デバイス経由でホス�
 |-------|--------|----------|------|
 | 1 | vsock（`vhost-vsock-pci`） | 標準ソケット API | **完了** |
 | 2 | ivshmem-plain 共有メモリ（[docs/shm-transport.md](docs/shm-transport.md)） | BAR2 を mmap するユーザ空間ドライバ、ポーリング | **完了** |
-| 3 | ivshmem-doorbell（[docs/doorbell-transport.md](docs/doorbell-transport.md)） | 自作カーネルモジュール、MSI-X 割り込み駆動 | **実装中（本リポジトリの現状）** |
+| 3 | ivshmem-doorbell（[docs/doorbell-transport.md](docs/doorbell-transport.md)） | 自作カーネルモジュール、MSI-X 割り込み駆動 | **完了** |
 
 Phase 2 と 3 はリングもメッセージも共通で、違いは通知方式（ポーリング /
 割り込み）だけ。`guest/user/bench.c` で両者を実測比較できる。
+
+3 フェーズ完了後、プロトコルを v0.2 に拡張して **BLIT**（共有メモリ上に
+置いたピクセルをホストが取り込むゼロコピー経路）を追加した。コマンドは
+リングを通るがピクセルは通らない、という共有メモリ本来の使い方。
+共有メモリ輸送でのみ有効で、詳細は
+[docs/protocol.md](docs/protocol.md) の BLIT 節を参照。
 
 ## リポジトリ構成
 
 ```
 proto/          プロトコル定義とコーデック（輸送層非依存）
 host/           ホストデーモン renderd と ivshmem サーバ ivshmemd
-guest/user/     ゲスト側クライアントライブラリとデモ（Phase 1-2）
+guest/user/     ゲスト側クライアントライブラリ、デモ、ベンチマーク
 guest/kmod/     ゲストカーネルモジュール（Phase 3）と、そのユーザ空間 API
 scripts/        QEMU 起動スクリプト
 containers/     カーネルモジュールビルド用コンテナ定義
@@ -47,7 +53,9 @@ $ make test     # プロトコル単体テスト + AF_UNIX / TCP 輸送での E2
 ```
 
 `make test` は QEMU なしで完結する（AF_UNIX・TCP・共有メモリ・doorbell の
-4 輸送で同一プロトコルを検証。輸送層非依存の確認を兼ねる）。さらに
+4 輸送で同一プロトコルを検証。輸送層非依存の確認を兼ねる。BLIT の描画結果が
+コマンド描画とバイト単位で一致することと、ストリーム輸送では拒否されることも
+確認する）。さらに
 `tests/vm-e2e.sh` は実際にゲストをブートし、ゲスト内からホストの renderd
 への描画を無人で検証する（CI で毎 PR 実行。カーネルモジュール経由の
 doorbell 経路と、ポーリングとのレイテンシ比較を含む。`/dev/vhost-vsock`
