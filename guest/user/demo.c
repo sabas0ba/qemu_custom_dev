@@ -18,6 +18,10 @@
  * With a trailing --blit the same scene is composited from pixels staged
  * in shared memory (protocol v0.2) rather than drawn with FILL_RECT; the
  * resulting frame is identical. Shared-memory transports only.
+ *
+ * With --rich it draws the v0.3 scene instead: a filled triangle, a line
+ * and a half-transparent rectangle composited over them. Works on every
+ * transport.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,14 +35,17 @@ int main(int argc, char **argv)
     int used = rc_connect_argv(&rc, argc - 1, argv + 1);
 
     if (used < 0) {
-        fprintf(stderr, "usage: demo %s [--blit]\n", rc_transport_usage());
+        fprintf(stderr, "usage: demo %s [--blit | --rich]\n",
+                rc_transport_usage());
         return argc > 1 ? 1 : 2;
     }
-    int blit = 0;
+    int blit = 0, rich = 0;
 
     for (int i = used + 1; i < argc; i++) {
         if (strcmp(argv[i], "--blit") == 0) {
             blit = 1;
+        } else if (strcmp(argv[i], "--rich") == 0) {
+            rich = 1;
         } else {
             fprintf(stderr, "demo: unexpected argument %s\n", argv[i]);
             rc_close(&rc);
@@ -47,7 +54,9 @@ int main(int argc, char **argv)
     }
 
     if (rc_hello(&rc) < 0 ||
-        (blit ? rc_draw_blit_scene(&rc, 1) : rc_draw_demo_scene(&rc, 1)) < 0 ||
+        (rich ? rc_draw_rich_scene(&rc, 1)
+              : blit ? rc_draw_blit_scene(&rc, 1)
+                     : rc_draw_demo_scene(&rc, 1)) < 0 ||
         rc_goodbye(&rc) < 0) {
         fprintf(stderr, "demo: protocol error\n");
         rc_close(&rc);

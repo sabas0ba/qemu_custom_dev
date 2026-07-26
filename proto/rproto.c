@@ -15,11 +15,19 @@ static void put16(uint8_t *p, uint16_t v)
     p[1] = (uint8_t)((v >> 8) & 0xff);
 }
 
+/* Signed coordinates travel two's-complement in a u32 slot. */
+static void puti32(uint8_t *p, int32_t v)
+{
+    put32(p, (uint32_t)v);
+}
+
 static uint32_t get32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+
+static int32_t geti32(const uint8_t *p);
 
 static uint16_t get16(const uint8_t *p)
 {
@@ -187,5 +195,76 @@ int rproto_dec_blit(const uint8_t *buf, uint32_t len, struct rproto_blit *m)
     m->y = get32(buf + 12);
     m->w = get32(buf + 16);
     m->h = get32(buf + 20);
+    return 0;
+}
+
+static int32_t geti32(const uint8_t *p)
+{
+    return (int32_t)get32(p);
+}
+
+uint32_t rproto_enc_set_blend(uint8_t *buf, const struct rproto_set_blend *m)
+{
+    put32(buf, m->mode);
+    return RPROTO_LEN_SET_BLEND;
+}
+
+int rproto_dec_set_blend(const uint8_t *buf, uint32_t len,
+                         struct rproto_set_blend *m)
+{
+    if (len != RPROTO_LEN_SET_BLEND)
+        return -1;
+    m->mode = get32(buf);
+    return 0;
+}
+
+uint32_t rproto_enc_draw_line(uint8_t *buf, const struct rproto_draw_line *m)
+{
+    puti32(buf + 0, m->x0);
+    puti32(buf + 4, m->y0);
+    puti32(buf + 8, m->x1);
+    puti32(buf + 12, m->y1);
+    put32(buf + 16, m->rgba);
+    return RPROTO_LEN_DRAW_LINE;
+}
+
+int rproto_dec_draw_line(const uint8_t *buf, uint32_t len,
+                         struct rproto_draw_line *m)
+{
+    if (len != RPROTO_LEN_DRAW_LINE)
+        return -1;
+    m->x0 = geti32(buf + 0);
+    m->y0 = geti32(buf + 4);
+    m->x1 = geti32(buf + 8);
+    m->y1 = geti32(buf + 12);
+    m->rgba = get32(buf + 16);
+    return 0;
+}
+
+uint32_t rproto_enc_draw_triangle(uint8_t *buf,
+                                  const struct rproto_draw_triangle *m)
+{
+    puti32(buf + 0, m->x0);
+    puti32(buf + 4, m->y0);
+    puti32(buf + 8, m->x1);
+    puti32(buf + 12, m->y1);
+    puti32(buf + 16, m->x2);
+    puti32(buf + 20, m->y2);
+    put32(buf + 24, m->rgba);
+    return RPROTO_LEN_DRAW_TRIANGLE;
+}
+
+int rproto_dec_draw_triangle(const uint8_t *buf, uint32_t len,
+                             struct rproto_draw_triangle *m)
+{
+    if (len != RPROTO_LEN_DRAW_TRIANGLE)
+        return -1;
+    m->x0 = geti32(buf + 0);
+    m->y0 = geti32(buf + 4);
+    m->x1 = geti32(buf + 8);
+    m->y1 = geti32(buf + 12);
+    m->x2 = geti32(buf + 16);
+    m->y2 = geti32(buf + 20);
+    m->rgba = get32(buf + 24);
     return 0;
 }

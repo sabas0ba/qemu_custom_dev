@@ -1,4 +1,4 @@
-# レンダラプロトコル v0.2
+# レンダラプロトコル v0.3
 
 ホスト側レンダラデーモン（`host/renderd`）とゲストクライアントの間で使う
 コマンドプロトコルの定義。**輸送層に依存しない**ことが設計の中心で、
@@ -60,6 +60,13 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 | 7    | GOODBYE         | C→S  | なし                              | 0    |
 | 8    | STATUS          | S→C  | status u32, seq_ref u32           | 8    |
 | 9    | BLIT (v0.2)     | C→S  | src_off u32, stride u32, x,y,w,h u32×4 | 24 |
+| 10   | SET_BLEND (v0.3)| C→S  | mode u32                          | 4    |
+| 11   | DRAW_LINE (v0.3)| C→S  | x0,y0,x1,y1 i32×4, rgba u32       | 20   |
+| 12   | DRAW_TRIANGLE (v0.3) | C→S | x0,y0,x1,y1,x2,y2 i32×6, rgba u32 | 28 |
+
+v0.3 の座標は**符号付き 32bit**（u32 のスロットに 2 の補数で入る）。
+線や三角形は頂点がサーフェス外にあるのが自然なため、位置指定である
+v0.1 の矩形系（u32）とは扱いが異なる。
 
 ペイロード長は完全一致を要求する（長すぎても短すぎても `ERR_PROTO`）。
 
@@ -110,6 +117,21 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 **能力の判定**: BLIT が使えるかは輸送層で決まるので、専用のネゴシエーションは
 持たない。クライアントは共有メモリ輸送を選んだ時のみ使い、加えて
 `HELLO_ACK` のマイナー版が 2 以上であることを確認する。
+
+## ラスタライザ（v0.3）
+
+`SET_BLEND` / `DRAW_LINE` / `DRAW_TRIANGLE` を追加した。輸送層は問わず、
+すべての輸送で使える（`HELLO_ACK` のマイナー版 3 以上が条件）。
+
+- `SET_BLEND`: 以降の描画の合成モードを切り替える。`0` = 上書き（既定、
+  v0.1/v0.2 と同じ挙動）、`1` = source-over。それ以外は `ERR_ARG`。
+  `CLEAR` だけはモードに関わらず上書き。
+- `DRAW_LINE`: 2 点間を Bresenham で結ぶ。範囲外の画素は捨てる。
+- `DRAW_TRIANGLE`: 塗りつぶし三角形。巻き方向は自由、退化三角形は無描画。
+
+合成式とラスタライズ規則の詳細、および丸めの定義は
+[renderer.md](renderer.md) にある（テストが期待値を手計算で書けるよう、
+すべて整数演算で固定してある）。
 
 ## 将来の互換性方針
 

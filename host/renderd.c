@@ -32,6 +32,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,10 +76,57 @@ struct session {
     int hello_done;
     uint32_t width;
     uint32_t height;
-    uint32_t *fb; /* width*height pixels, 0xRRGGBBAA */
+    uint32_t blend; /* enum rproto_blend; REPLACE unless SET_BLEND says so */
+    uint32_t *fb;   /* width*height pixels, 0xRRGGBBAA */
 };
 
 static const char *g_outdir = ".";
+
+/*
+ * One channel of source-over compositing, rounded to nearest:
+ *   out = (s*a + d*(255-a) + 127) / 255
+ * Integer and exact, so the tests can predict every pixel. See
+ * docs/renderer.md.
+ */
+static uint32_t blend_chan(uint32_t s, uint32_t d, uint32_t a)
+{
+    return (s * a + d * (255u - a) + 127u) / 255u;
+}
+
+/* Combine one source pixel with the destination under the session's mode. */
+static uint32_t blend_px(const struct session *s, uint32_t src, uint32_t dst)
+{
+    uint32_t sa;
+
+    if (s->blend == RPROTO_BLEND_REPLACE)
+        return src;
+    sa = src & 0xffu;
+    if (sa == 255u)
+        return src;
+    if (sa == 0u)
+        return dst;
+    return (blend_chan((src >> 24) & 0xff, (dst >> 24) & 0xff, sa) << 24) |
+           (blend_chan((src >> 16) & 0xff, (dst >> 16) & 0xff, sa) << 16) |
+           (blend_chan((src >> 8) & 0xff, (dst >> 8) & 0xff, sa) << 8) |
+           /*
+            * out alpha = sa + da*(1-sa), which is the same expression with
+            * a fully opaque source: blend_chan caps it at 255, where
+            * adding the terms by hand would overflow into the blue
+            * channel.
+            */
+           blend_chan(255u, dst & 0xffu, sa);
+}
+
+/* Write one pixel, ignoring anything outside the surface. */
+static void fb_put(struct session *s, int64_t x, int64_t y, uint32_t rgba)
+{
+    uint32_t *p;
+
+    if (x < 0 || y < 0 || x >= (int64_t)s->width || y >= (int64_t)s->height)
+        return;
+    p = &s->fb[(size_t)y * s->width + (size_t)x];
+    *p = blend_px(s, rgba, *p);
+}
 
 static void fb_fill_rect(struct session *s, uint32_t x, uint32_t y,
                          uint32_t w, uint32_t h, uint32_t rgba)
@@ -90,8 +138,87 @@ static void fb_fill_rect(struct session *s, uint32_t x, uint32_t y,
     if (h > s->height - y)
         h = s->height - y;
     for (uint32_t row = y; row < y + h; row++)
-        for (uint32_t col = x; col < x + w; col++)
-            s->fb[(size_t)row * s->width + col] = rgba;
+        for (uint32_t col = x; col < x + w; col++) {
+            uint32_t *p = &s->fb[(size_t)row * s->width + col];
+
+            *p = blend_px(s, rgba, *p);
+        }
+}
+
+/* Bresenham, clipped per pixel rather than up front: the endpoints may sit
+ * far outside the surface and the loop is cheap enough not to care. */
+static void fb_line(struct session *s, const struct rproto_draw_line *m)
+{
+    int64_t x0 = m->x0, y0 = m->y0;
+    int64_t dx = llabs((long long)m->x1 - m->x0);
+    int64_t dy = -llabs((long long)m->y1 - m->y0);
+    int64_t sx = m->x0 < m->x1 ? 1 : -1;
+    int64_t sy = m->y0 < m->y1 ? 1 : -1;
+    int64_t err = dx + dy;
+
+    for (;;) {
+        fb_put(s, x0, y0, m->rgba);
+        if (x0 == m->x1 && y0 == m->y1)
+            break;
+        int64_t e2 = 2 * err;
+
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/* Edge function: twice the signed area of the triangle (a, b, p). */
+static int64_t edge(int64_t ax, int64_t ay, int64_t bx, int64_t by,
+                    int64_t px, int64_t py)
+{
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+/*
+ * Filled triangle by edge functions over the bounding box, clipped to the
+ * surface. Either winding is accepted: the sign of the doubled area picks
+ * which way "inside" points.
+ */
+static void fb_triangle(struct session *s, const struct rproto_draw_triangle *m)
+{
+    int64_t x0 = m->x0, y0 = m->y0, x1 = m->x1, y1 = m->y1;
+    int64_t x2 = m->x2, y2 = m->y2;
+    int64_t area = edge(x0, y0, x1, y1, x2, y2);
+    int64_t minx, maxx, miny, maxy;
+    int sign;
+
+    if (area == 0)
+        return; /* degenerate: no interior to fill */
+    sign = area > 0 ? 1 : -1;
+
+    minx = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+    maxx = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+    miny = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    maxy = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+    if (minx < 0)
+        minx = 0;
+    if (miny < 0)
+        miny = 0;
+    if (maxx > (int64_t)s->width - 1)
+        maxx = (int64_t)s->width - 1;
+    if (maxy > (int64_t)s->height - 1)
+        maxy = (int64_t)s->height - 1;
+
+    for (int64_t py = miny; py <= maxy; py++)
+        for (int64_t px = minx; px <= maxx; px++) {
+            int64_t w0 = edge(x1, y1, x2, y2, px, py) * sign;
+            int64_t w1 = edge(x2, y2, x0, y0, px, py) * sign;
+            int64_t w2 = edge(x0, y0, x1, y1, px, py) * sign;
+
+            if (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                fb_put(s, px, py, m->rgba);
+        }
 }
 
 /*
@@ -115,9 +242,12 @@ static void fb_blit(struct session *s, const struct rproto_blit *m)
         const uint8_t *sp = src + (size_t)row * m->stride;
         uint32_t *dp = s->fb + (size_t)(m->y + row) * s->width + m->x;
 
-        for (uint32_t col = 0; col < w; col++, sp += 4)
-            dp[col] = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) |
-                      ((uint32_t)sp[2] << 8) | (uint32_t)sp[3];
+        for (uint32_t col = 0; col < w; col++, sp += 4) {
+            uint32_t src = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) |
+                           ((uint32_t)sp[2] << 8) | (uint32_t)sp[3];
+
+            dp[col] = blend_px(s, src, dp[col]);
+        }
     }
 }
 
@@ -190,6 +320,9 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
             return RPROTO_ST_ERR_STATE;
         if (rproto_dec_clear(payload, hdr->payload_len, &m) < 0)
             return RPROTO_ST_ERR_PROTO;
+        /* CLEAR resets the surface, so it overwrites regardless of the
+         * blend mode — compositing onto what you are clearing is not a
+         * thing anyone means. */
         for (size_t i = 0; i < (size_t)s->width * s->height; i++)
             s->fb[i] = m.rgba;
         return RPROTO_ST_OK;
@@ -229,6 +362,38 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
         if ((uint64_t)m.src_off + extent > s->io->staging_size)
             return RPROTO_ST_ERR_ARG;
         fb_blit(s, &m);
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_SET_BLEND: {
+        struct rproto_set_blend m;
+
+        if (!s->hello_done)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_set_blend(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        if (m.mode != RPROTO_BLEND_REPLACE && m.mode != RPROTO_BLEND_SRC_OVER)
+            return RPROTO_ST_ERR_ARG;
+        s->blend = m.mode;
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_DRAW_LINE: {
+        struct rproto_draw_line m;
+
+        if (!s->fb)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_draw_line(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        fb_line(s, &m);
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_DRAW_TRIANGLE: {
+        struct rproto_draw_triangle m;
+
+        if (!s->fb)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_draw_triangle(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        fb_triangle(s, &m);
         return RPROTO_ST_OK;
     }
     case RPROTO_MSG_PRESENT: {

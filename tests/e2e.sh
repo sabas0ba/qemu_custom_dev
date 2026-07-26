@@ -88,6 +88,35 @@ trap - EXIT
 check_frame "$TMP/shm/frame-000001.ppm"
 echo "e2e: shm transport OK"
 
+# --- v0.3 rasterizer: triangle, line and alpha compositing ---
+# The blended values below are computed by hand from the documented
+# formula (docs/renderer.md); they are the point of the check, so they are
+# spelled out rather than derived from another run.
+mkdir -p "$TMP/rich"
+"$BUILD/renderd" --unix "$TMP/rich/sock" --out "$TMP/rich" --once &
+RENDERD_PID=$!
+trap 'kill "$RENDERD_PID" 2>/dev/null || true; wait "$RENDERD_PID" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 100); do
+    [ -S "$TMP/rich/sock" ] && break
+    sleep 0.05
+done
+"$BUILD/demo" --unix "$TMP/rich/sock" --rich
+wait "$RENDERD_PID"
+trap - EXIT
+
+RICH="$TMP/rich/frame-000001.ppm"
+[ -f "$RICH" ] || { echo "e2e: missing $RICH" >&2; exit 1; }
+"$BUILD/ppm_check" "$RICH"   5   5 102030   # background
+"$BUILD/ppm_check" "$RICH"  10 230 102030   # outside the triangle
+"$BUILD/ppm_check" "$RICH" 160 150 00c000   # inside the triangle, opaque
+"$BUILD/ppm_check" "$RICH" 100 200 ffffff   # the line
+# 50% red over the triangle: (255*128 + 0*127 + 127)/255 = 128, etc.
+"$BUILD/ppm_check" "$RICH" 160 100 806000
+# 50% red over the background 0x102030
+"$BUILD/ppm_check" "$RICH" 215  65 881018
+echo "e2e: rasterizer and alpha compositing OK"
+
 # --- BLIT over shared memory (protocol v0.2) ---
 # The zero-copy path must land exactly the pixels the command path does,
 # so the frame is compared byte for byte against the run above.

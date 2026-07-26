@@ -454,6 +454,68 @@ int rc_draw_demo_scene(struct render_client *rc, uint32_t frame_id)
     return 0;
 }
 
+int rc_set_blend(struct render_client *rc, uint32_t mode)
+{
+    uint8_t buf[RPROTO_LEN_SET_BLEND];
+    struct rproto_set_blend m = { .mode = mode };
+
+    if (rc->server_minor < 3) {
+        fprintf(stderr, "render_client: server speaks v0.%u, blending needs"
+                " v0.3\n", rc->server_minor);
+        return -1;
+    }
+    return rc_call(rc, RPROTO_MSG_SET_BLEND, buf,
+                   rproto_enc_set_blend(buf, &m));
+}
+
+int rc_draw_line(struct render_client *rc, int32_t x0, int32_t y0,
+                 int32_t x1, int32_t y1, uint32_t rgba)
+{
+    uint8_t buf[RPROTO_LEN_DRAW_LINE];
+    struct rproto_draw_line m = { .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1,
+                                  .rgba = rgba };
+
+    if (rc->server_minor < 3) {
+        fprintf(stderr, "render_client: server speaks v0.%u, DRAW_LINE needs"
+                " v0.3\n", rc->server_minor);
+        return -1;
+    }
+    return rc_call(rc, RPROTO_MSG_DRAW_LINE, buf,
+                   rproto_enc_draw_line(buf, &m));
+}
+
+int rc_draw_triangle(struct render_client *rc, int32_t x0, int32_t y0,
+                     int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                     uint32_t rgba)
+{
+    uint8_t buf[RPROTO_LEN_DRAW_TRIANGLE];
+    struct rproto_draw_triangle m = { .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1,
+                                      .x2 = x2, .y2 = y2, .rgba = rgba };
+
+    if (rc->server_minor < 3) {
+        fprintf(stderr, "render_client: server speaks v0.%u, DRAW_TRIANGLE"
+                " needs v0.3\n", rc->server_minor);
+        return -1;
+    }
+    return rc_call(rc, RPROTO_MSG_DRAW_TRIANGLE, buf,
+                   rproto_enc_draw_triangle(buf, &m));
+}
+
+int rc_draw_rich_scene(struct render_client *rc, uint32_t frame_id)
+{
+    /* Order matters: the triangle and the line are laid down opaque, then
+     * the mode switches and the rectangle composites over both. */
+    if (rc_create_surface(rc, 320, 240) < 0 ||
+        rc_clear(rc, 0x102030ff) < 0 ||
+        rc_draw_triangle(rc, 160, 20, 40, 180, 280, 180, 0x00c000ff) < 0 ||
+        rc_draw_line(rc, 20, 200, 300, 200, 0xffffffff) < 0 ||
+        rc_set_blend(rc, RPROTO_BLEND_SRC_OVER) < 0 ||
+        rc_fill_rect(rc, 140, 60, 80, 50, 0xff000080) < 0 ||
+        rc_present(rc, frame_id) < 0)
+        return -1;
+    return 0;
+}
+
 /* Fill n pixels of staging with one R,G,B,A colour. */
 static void stage_solid(uint8_t *dst, size_t n, uint32_t rgba)
 {

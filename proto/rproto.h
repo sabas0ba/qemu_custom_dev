@@ -15,7 +15,7 @@
 
 #define RPROTO_MAGIC       0x30524456u /* "VDR0" in little-endian byte order */
 #define RPROTO_VER_MAJOR   0u
-#define RPROTO_VER_MINOR   2u
+#define RPROTO_VER_MINOR   3u
 
 /* Fixed message header: type(u32) seq(u32) payload_len(u32) */
 #define RPROTO_HDR_SIZE    12u
@@ -39,6 +39,22 @@ enum rproto_msg_type {
      * A server without a shared region answers ERR_STATE.
      */
     RPROTO_MSG_BLIT           = 9, /* client -> server */
+    /*
+     * v0.3 rasterizer commands. Coordinates are signed here, unlike the
+     * v0.1 ones: lines and triangles are naturally specified with vertices
+     * off the surface and clipped, rather than positioned like a rect.
+     */
+    RPROTO_MSG_SET_BLEND      = 10, /* client -> server */
+    RPROTO_MSG_DRAW_LINE      = 11, /* client -> server */
+    RPROTO_MSG_DRAW_TRIANGLE  = 12, /* client -> server */
+};
+
+/* Blend modes, selected with SET_BLEND and applied to every drawing
+ * command except CLEAR. REPLACE is the default and is what v0.1/v0.2
+ * clients get without asking. */
+enum rproto_blend {
+    RPROTO_BLEND_REPLACE  = 0, /* dst = src, alpha copied verbatim */
+    RPROTO_BLEND_SRC_OVER = 1, /* dst = src over dst, see docs/renderer.md */
 };
 
 enum rproto_status {
@@ -106,6 +122,29 @@ struct rproto_blit {
     uint32_t h;
 };
 
+struct rproto_set_blend {
+    uint32_t mode; /* enum rproto_blend */
+};
+
+/* Signed coordinates, carried two's-complement in the u32 wire slots. */
+struct rproto_draw_line {
+    int32_t x0;
+    int32_t y0;
+    int32_t x1;
+    int32_t y1;
+    uint32_t rgba;
+};
+
+struct rproto_draw_triangle {
+    int32_t x0;
+    int32_t y0;
+    int32_t x1;
+    int32_t y1;
+    int32_t x2;
+    int32_t y2;
+    uint32_t rgba;
+};
+
 struct rproto_status_msg {
     uint32_t status;  /* enum rproto_status */
     uint32_t seq_ref; /* seq of the request this responds to */
@@ -121,6 +160,9 @@ struct rproto_status_msg {
 #define RPROTO_LEN_GOODBYE        0u
 #define RPROTO_LEN_STATUS         8u
 #define RPROTO_LEN_BLIT           24u
+#define RPROTO_LEN_SET_BLEND      4u
+#define RPROTO_LEN_DRAW_LINE      20u
+#define RPROTO_LEN_DRAW_TRIANGLE  28u
 
 /* Header codec */
 void rproto_encode_hdr(uint8_t buf[RPROTO_HDR_SIZE], const struct rproto_hdr *h);
@@ -154,6 +196,19 @@ int rproto_dec_status(const uint8_t *buf, uint32_t len, struct rproto_status_msg
 
 uint32_t rproto_enc_blit(uint8_t *buf, const struct rproto_blit *m);
 int rproto_dec_blit(const uint8_t *buf, uint32_t len, struct rproto_blit *m);
+
+uint32_t rproto_enc_set_blend(uint8_t *buf, const struct rproto_set_blend *m);
+int rproto_dec_set_blend(const uint8_t *buf, uint32_t len,
+                         struct rproto_set_blend *m);
+
+uint32_t rproto_enc_draw_line(uint8_t *buf, const struct rproto_draw_line *m);
+int rproto_dec_draw_line(const uint8_t *buf, uint32_t len,
+                         struct rproto_draw_line *m);
+
+uint32_t rproto_enc_draw_triangle(uint8_t *buf,
+                                  const struct rproto_draw_triangle *m);
+int rproto_dec_draw_triangle(const uint8_t *buf, uint32_t len,
+                             struct rproto_draw_triangle *m);
 
 /*
  * Framed I/O over a connected stream fd (vsock, unix, tcp, ...).
