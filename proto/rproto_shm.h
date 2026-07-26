@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * rproto_shm.h - shared-memory transport for renderer protocol v0 (Phase 2).
  *

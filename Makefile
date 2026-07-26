@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Build for host-side tools and guest userspace clients.
 # Dependencies: a C11 toolchain and GNU make only.
 CC       ?= cc

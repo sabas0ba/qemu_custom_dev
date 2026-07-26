@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * demo - draws a fixed test scene through the renderer protocol.
  *

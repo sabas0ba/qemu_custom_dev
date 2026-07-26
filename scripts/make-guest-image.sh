@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Build the Phase 1 guest disk image and cloud-init seed ISO.
 #
 # Downloads a pinned Ubuntu cloud image (verified against a pinned SHA256),

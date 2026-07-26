@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include "rproto.h"
 
 static void put32(uint8_t *p, uint32_t v)

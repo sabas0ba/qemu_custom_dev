@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Full-stack test: boot the real guest image under QEMU and drive the
 # renderer from INSIDE the guest against daemons on the host.
 #

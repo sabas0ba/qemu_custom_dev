@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * render_client.h - guest-side client library for renderer protocol v0.
  *

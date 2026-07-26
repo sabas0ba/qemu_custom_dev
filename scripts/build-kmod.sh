@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Build the guest kernel module against the *guest* kernel's headers.
 #
 # The module has to match the kernel it will be loaded into (6.8.0-134 in

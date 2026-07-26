@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Build environment for the guest kernel module.
 #
 # Pinned to the distribution and kernel of the guest image produced by

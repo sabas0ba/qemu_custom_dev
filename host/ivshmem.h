@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ivshmem.h - ivshmem server/client protocol (Phase 3).
  *

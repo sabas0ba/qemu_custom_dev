@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ivshmemd - minimal ivshmem server (Phase 3).
  *

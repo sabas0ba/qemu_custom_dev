@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>

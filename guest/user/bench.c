@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * bench - request/response latency and throughput over any transport.
  *

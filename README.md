@@ -104,3 +104,28 @@ Phase 3（割り込み駆動）は `ivshmemd` と `renderd --ivshmem` を起動�
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/) に従う。
 - `main` への merge は PR 経由で行う。
 - 一時ファイルはリポジトリ内の `.tmp/`（gitignore 済み）に置く。
+- 新規ファイルには SPDX ライセンス識別子を付ける（下記）。
+
+## ライセンス
+
+本プロジェクトは **GNU General Public License v2.0 only（GPL-2.0-only）** で
+配布する。全文は [LICENSE](LICENSE) を参照。
+
+GPL を選んでいる理由: `guest/kmod/` のゲストカーネルモジュール
+（`ivshmem_rproto`）は Linux カーネルモジュールであり、カーネルの内部 API を
+使うため GPL-2.0 でなければならない（ソースは
+`// SPDX-License-Identifier: GPL-2.0-only`、モジュールは
+`MODULE_LICENSE("GPL")` を宣言している。これがないとカーネルは
+GPL 限定シンボルの使用を拒否する）。リポジトリ内の他のコンポーネント
+（ホストデーモン、ゲストユーザ空間、プロトコル層、テスト）はカーネル
+モジュールと同じ ABI ヘッダ（`guest/kmod/ivshmem_rproto.h`）を共有しており、
+ライセンスを揃えておくのが素直なため、プロジェクト全体を同一の
+GPL-2.0-only とする。
+
+リポジトリ内の全ソースファイル（C、シェルスクリプト、Makefile、
+Dockerfile、CI 定義）は先頭に `SPDX-License-Identifier: GPL-2.0-only` を
+持つ。
+
+外部由来のもの: ゲスト実行環境として使う Ubuntu cloud image と QEMU は
+本リポジトリには含まれず、実行時に各自のライセンスで入手・利用される
+（QEMU 本体は無改変）。

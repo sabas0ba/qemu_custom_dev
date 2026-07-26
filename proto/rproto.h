@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * rproto.h - renderer protocol v0 (transport-independent)
  *

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Kbuild makefile for the guest kernel module.
 #
 # The module must be built against the *guest* kernel, not the machine you

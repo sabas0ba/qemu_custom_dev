@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * renderd - host-side renderer daemon (Phase 1).
  *

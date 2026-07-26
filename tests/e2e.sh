@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # End-to-end test: renderd + demo over an AF_UNIX socket.
 #
 # Exercises the full protocol path (HELLO, CREATE_SURFACE, CLEAR, FILL_RECT,

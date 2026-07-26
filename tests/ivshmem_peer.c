@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ivshmem_peer - stands in for the guest in host-only doorbell tests.
  *
