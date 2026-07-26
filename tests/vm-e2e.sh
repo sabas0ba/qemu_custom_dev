@@ -11,7 +11,10 @@
 #           polled ring
 #   boot 2  ivshmem-doorbell through the ivshmem_rproto kernel module,
 #           plus the same measurement over interrupts — the Phase 2 vs
-#           Phase 3 comparison the project set out to make
+#           Phase 3 comparison the project set out to make — and the
+#           protocol v0.2 zero-copy pixel path (BLIT out of the shared
+#           staging area), both measured and checked against the frame
+#           boot 1 drew with commands
 #
 # The guest runs unattended: cloud-init's runcmd executes statically
 # linked binaries from the 9p-shared repo and powers the guest off. No
@@ -159,7 +162,7 @@ DB_PID=$!
 # round trip the polled run measured in boot 1.
 AUTORUN="$WAIT_MOUNT; insmod /mnt/repo/guest/kmod/ivshmem_rproto.ko"
 AUTORUN="$AUTORUN; dmesg | grep -i ivshmem_rproto"
-AUTORUN="$AUTORUN; /mnt/repo/build/bench-static --doorbell --iters $BENCH_ITERS --scene"
+AUTORUN="$AUTORUN; /mnt/repo/build/bench-static --doorbell --iters $BENCH_ITERS --blit --blit-scene"
 AUTORUN="$AUTORUN; poweroff"
 
 IVSHMEM_SOCKET="$IVSOCK" boot_guest doorbell "$AUTORUN"
@@ -176,6 +179,12 @@ fi
 check_frame "$TMP/frames-doorbell/frame-000001.ppm" "$LOG2"
 echo "vm-e2e: doorbell transport OK"
 
+# The doorbell frame was composited from pixels the guest staged in shared
+# memory; boot 1 drew the same scene with FILL_RECT. Zero-copy is only
+# useful if it lands exactly the same pixels.
+cmp "$TMP/frames-doorbell/frame-000001.ppm" "$TMP/frames-shm/frame-000001.ppm"
+echo "vm-e2e: blit matches the command-drawn frame OK"
+
 POLL_MEAN="$(bench_value "$LOG1" mean_us || true)"
 POLL_P50="$(bench_value "$LOG1" p50_us || true)"
 DB_MEAN="$(bench_value "$LOG2" mean_us || true)"
@@ -187,5 +196,12 @@ printf 'vm-e2e:   %-22s mean %8s us   p50 %8s us\n' \
     "doorbell (Phase 3)" "${DB_MEAN:-n/a}" "${DB_P50:-n/a}"
 [ -n "$POLL_MEAN" ] && [ -n "$DB_MEAN" ] || \
     echo "vm-e2e: WARNING benchmark numbers incomplete" >&2
+
+BLIT_MIB="$(bench_value "$LOG2" blit_throughput_mib_s || true)"
+BLIT_FPS="$(bench_value "$LOG2" blit_frames_per_sec || true)"
+BLIT_BYTES="$(bench_value "$LOG2" blit_frame_bytes || true)"
+echo "vm-e2e: zero-copy pixel throughput (BLIT, doorbell,"\
+     "${BLIT_BYTES:-?} B/frame): ${BLIT_MIB:-n/a} MiB/s," \
+     "${BLIT_FPS:-n/a} frames/s"
 
 echo "vm-e2e: OK"

@@ -30,6 +30,7 @@ struct render_client {
     struct rc_doorbell db;
     struct rshm_notifier notifier;
     const struct rshm_notifier *notifier_p; /* NULL = poll the ring */
+    uint16_t server_minor; /* protocol minor the server reported in HELLO_ACK */
     uint32_t next_seq;
 };
 
@@ -81,12 +82,38 @@ int rc_present(struct render_client *rc, uint32_t frame_id);
 int rc_goodbye(struct render_client *rc);
 
 /*
+ * v0.2 zero-copy pixel path, shared-memory transports only.
+ *
+ * rc_staging hands back the region of shared memory reserved for pixel
+ * data (the area the host reads BLIT sources from) and its size, or NULL
+ * when the transport has none. Write R,G,B,A bytes there, then call
+ * rc_blit to have the host composite them into the surface at (x, y).
+ * stride is the byte distance between source rows, so a sub-rectangle of
+ * a larger image can be handed over without repacking.
+ *
+ * The ring's release/acquire pair orders those pixel writes before the
+ * host observes the BLIT, so no extra barrier is needed here.
+ */
+void *rc_staging(struct render_client *rc, size_t *size);
+int rc_blit(struct render_client *rc, uint32_t src_off, uint32_t stride,
+            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+
+/*
  * Draw the project's standard test scene and present it as frame_id:
  * a 320x240 surface cleared to 0x102030, a red rectangle at (40,40) 80x60
  * and a green one at (160,120) 100x80. tests/e2e.sh and tests/vm-e2e.sh
  * check those exact pixels, so every caller draws the same thing.
  */
 int rc_draw_demo_scene(struct render_client *rc, uint32_t frame_id);
+
+/*
+ * Draw the very same scene, but with the two rectangles staged in shared
+ * memory and composited with BLIT instead of drawn with FILL_RECT. The
+ * resulting frame must be identical to rc_draw_demo_scene's, which is
+ * what the tests compare: the zero-copy path is only useful if it lands
+ * exactly the same pixels. Shared-memory transports only.
+ */
+int rc_draw_blit_scene(struct render_client *rc, uint32_t frame_id);
 
 void rc_close(struct render_client *rc);
 

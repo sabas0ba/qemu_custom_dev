@@ -15,7 +15,7 @@
 
 #define RPROTO_MAGIC       0x30524456u /* "VDR0" in little-endian byte order */
 #define RPROTO_VER_MAJOR   0u
-#define RPROTO_VER_MINOR   1u
+#define RPROTO_VER_MINOR   2u
 
 /* Fixed message header: type(u32) seq(u32) payload_len(u32) */
 #define RPROTO_HDR_SIZE    12u
@@ -33,6 +33,12 @@ enum rproto_msg_type {
     RPROTO_MSG_PRESENT        = 6, /* client -> server */
     RPROTO_MSG_GOODBYE        = 7, /* client -> server */
     RPROTO_MSG_STATUS         = 8, /* server -> client */
+    /*
+     * v0.2, shared-memory transports only: the client wrote pixels into
+     * the shared region's staging area and asks for them to be composited.
+     * A server without a shared region answers ERR_STATE.
+     */
+    RPROTO_MSG_BLIT           = 9, /* client -> server */
 };
 
 enum rproto_status {
@@ -84,6 +90,22 @@ struct rproto_present {
     uint32_t frame_id;
 };
 
+/*
+ * Copy w*h RGBA8888 pixels out of the shared staging area into the
+ * surface at (x, y). src_off is a byte offset from the start of the
+ * staging area and stride is the distance in bytes between source rows,
+ * so a client can hand over a sub-rectangle of a larger image without
+ * repacking it.
+ */
+struct rproto_blit {
+    uint32_t src_off;
+    uint32_t stride;
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+};
+
 struct rproto_status_msg {
     uint32_t status;  /* enum rproto_status */
     uint32_t seq_ref; /* seq of the request this responds to */
@@ -98,6 +120,7 @@ struct rproto_status_msg {
 #define RPROTO_LEN_PRESENT        4u
 #define RPROTO_LEN_GOODBYE        0u
 #define RPROTO_LEN_STATUS         8u
+#define RPROTO_LEN_BLIT           24u
 
 /* Header codec */
 void rproto_encode_hdr(uint8_t buf[RPROTO_HDR_SIZE], const struct rproto_hdr *h);
@@ -128,6 +151,9 @@ int rproto_dec_present(const uint8_t *buf, uint32_t len, struct rproto_present *
 
 uint32_t rproto_enc_status(uint8_t *buf, const struct rproto_status_msg *m);
 int rproto_dec_status(const uint8_t *buf, uint32_t len, struct rproto_status_msg *m);
+
+uint32_t rproto_enc_blit(uint8_t *buf, const struct rproto_blit *m);
+int rproto_dec_blit(const uint8_t *buf, uint32_t len, struct rproto_blit *m);
 
 /*
  * Framed I/O over a connected stream fd (vsock, unix, tcp, ...).

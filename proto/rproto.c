@@ -165,3 +165,27 @@ int rproto_dec_status(const uint8_t *buf, uint32_t len, struct rproto_status_msg
     m->seq_ref = get32(buf + 4);
     return 0;
 }
+
+uint32_t rproto_enc_blit(uint8_t *buf, const struct rproto_blit *m)
+{
+    put32(buf + 0, m->src_off);
+    put32(buf + 4, m->stride);
+    put32(buf + 8, m->x);
+    put32(buf + 12, m->y);
+    put32(buf + 16, m->w);
+    put32(buf + 20, m->h);
+    return RPROTO_LEN_BLIT;
+}
+
+int rproto_dec_blit(const uint8_t *buf, uint32_t len, struct rproto_blit *m)
+{
+    if (len != RPROTO_LEN_BLIT)
+        return -1;
+    m->src_off = get32(buf + 0);
+    m->stride = get32(buf + 4);
+    m->x = get32(buf + 8);
+    m->y = get32(buf + 12);
+    m->w = get32(buf + 16);
+    m->h = get32(buf + 20);
+    return 0;
+}

@@ -369,6 +369,9 @@ int rc_hello(struct render_client *rc)
         rproto_dec_hello_ack(buf, hdr.payload_len, &ack) < 0 ||
         ack.magic != RPROTO_MAGIC || ack.ver_major != RPROTO_VER_MAJOR)
         return -1;
+    /* Minor versions only add messages, so remember what this server
+     * supports rather than refusing to talk to an older one. */
+    rc->server_minor = ack.ver_minor;
     return 0;
 }
 
@@ -398,6 +401,35 @@ int rc_fill_rect(struct render_client *rc, uint32_t x, uint32_t y,
     return rc_call(rc, RPROTO_MSG_FILL_RECT, buf, rproto_enc_fill_rect(buf, &m));
 }
 
+void *rc_staging(struct render_client *rc, size_t *size)
+{
+    if (!rc->use_shm)
+        return NULL;
+    if (size)
+        *size = rc->shm.hdr->fb_size;
+    return (uint8_t *)rc->shm.hdr + rc->shm.hdr->fb_off;
+}
+
+int rc_blit(struct render_client *rc, uint32_t src_off, uint32_t stride,
+            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    uint8_t buf[RPROTO_LEN_BLIT];
+    struct rproto_blit m = { .src_off = src_off, .stride = stride,
+                             .x = x, .y = y, .w = w, .h = h };
+
+    if (!rc->use_shm) {
+        fprintf(stderr, "render_client: BLIT needs a shared-memory"
+                " transport\n");
+        return -1;
+    }
+    if (rc->server_minor < 2) {
+        fprintf(stderr, "render_client: server speaks v0.%u, BLIT needs"
+                " v0.2\n", rc->server_minor);
+        return -1;
+    }
+    return rc_call(rc, RPROTO_MSG_BLIT, buf, rproto_enc_blit(buf, &m));
+}
+
 int rc_present(struct render_client *rc, uint32_t frame_id)
 {
     uint8_t buf[RPROTO_LEN_PRESENT];
@@ -417,6 +449,46 @@ int rc_draw_demo_scene(struct render_client *rc, uint32_t frame_id)
         rc_clear(rc, 0x102030ff) < 0 ||
         rc_fill_rect(rc, 40, 40, 80, 60, 0xff0000ff) < 0 ||
         rc_fill_rect(rc, 160, 120, 100, 80, 0x00ff00ff) < 0 ||
+        rc_present(rc, frame_id) < 0)
+        return -1;
+    return 0;
+}
+
+/* Fill n pixels of staging with one R,G,B,A colour. */
+static void stage_solid(uint8_t *dst, size_t n, uint32_t rgba)
+{
+    for (size_t i = 0; i < n; i++, dst += 4) {
+        dst[0] = (uint8_t)((rgba >> 24) & 0xff);
+        dst[1] = (uint8_t)((rgba >> 16) & 0xff);
+        dst[2] = (uint8_t)((rgba >> 8) & 0xff);
+        dst[3] = (uint8_t)(rgba & 0xff);
+    }
+}
+
+int rc_draw_blit_scene(struct render_client *rc, uint32_t frame_id)
+{
+    size_t staging_size = 0;
+    uint8_t *staging = rc_staging(rc, &staging_size);
+    /* same two rectangles as rc_draw_demo_scene */
+    const uint32_t red_px = 80u * 60u, green_px = 100u * 80u;
+    const uint32_t green_off = red_px * 4u;
+
+    if (!staging) {
+        fprintf(stderr, "render_client: no staging area on this"
+                " transport\n");
+        return -1;
+    }
+    if (staging_size < (size_t)green_off + green_px * 4u) {
+        fprintf(stderr, "render_client: staging area too small\n");
+        return -1;
+    }
+    stage_solid(staging, red_px, 0xff0000ff);
+    stage_solid(staging + green_off, green_px, 0x00ff00ff);
+
+    if (rc_create_surface(rc, 320, 240) < 0 ||
+        rc_clear(rc, 0x102030ff) < 0 ||
+        rc_blit(rc, 0, 80u * 4u, 40, 40, 80, 60) < 0 ||
+        rc_blit(rc, green_off, 100u * 4u, 160, 120, 100, 80) < 0 ||
         rc_present(rc, frame_id) < 0)
         return -1;
     return 0;

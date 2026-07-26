@@ -43,7 +43,7 @@ renderd --shm FILE                        demo --shm-pci
 | `0x0000` | `struct rshm_hdr`（magic, version, 各領域のオフセット・サイズ） |
 | `g2h_off` | ゲスト→ホスト（要求）リング: `rshm_ring_hdr` + データ 256 KiB |
 | `h2g_off` | ホスト→ゲスト（応答）リング: 同上 |
-| `fb_off` | 予約（将来のゲスト直書きフレームバッファ用。Phase 2 では未使用） |
+| `fb_off` | staging 領域。クライアントがピクセルを直接書き、`BLIT` でホストが取り込む（プロトコル v0.2。既定で約 3.5 MiB） |
 
 初期化の公開順序: ホストは全フィールドを書いてから **release ストアで
 magic を最後に書く**。ゲストは magic を acquire ロードでポーリングして
@@ -115,3 +115,15 @@ guest$ sudo /mnt/repo/build/demo --shm-pci
 どちらの経路も自動テストで検証される: `make test`（ファイル共有）、
 `tests/vm-e2e.sh`（実ゲスト・PCI。ivshmem は vhost 不要のため CI・
 コンテナでも動く）。
+
+## staging 領域とゼロコピー（v0.2）
+
+リングを流れるのはコマンドだけで、ピクセルは `fb_off` 以降の staging
+領域に置いて `BLIT` で参照する。共有メモリを使う本来の理由がここにある
+（コマンド 1 個は数十バイトだが、1 フレームは数百 KB〜数 MB）。
+形式と検証規則は [protocol.md](protocol.md) の BLIT 節を参照。
+
+`bench --blit` でフレーム毎のスループットを測れる。ホスト内 2 プロセス
+（ファイル共有）では 640x480 RGBA でおおむね 3 GiB/s 前後 —
+実質ホスト側の memcpy と R,G,B,A → 0xRRGGBBAA 変換のコストで、
+リング経由のコマンドは 1 フレームあたり 1 通しか流れない。
