@@ -20,6 +20,7 @@
 #include "rproto.h"
 #include "render_client.h"
 #include "ivshmem_rproto.h"
+#include "virtio_rproto.h"
 
 /* How long connect/handshake waits for the host side, in ms. */
 #define RC_SHM_ATTACH_TIMEOUT 5000
@@ -43,6 +44,7 @@ int rc_connect_unix(struct render_client *rc, const char *path)
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
     rc->db.fd = -1;
+    rc->vfd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -65,6 +67,7 @@ int rc_connect_vsock(struct render_client *rc, uint32_t cid, uint32_t port)
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
     rc->db.fd = -1;
+    rc->vfd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -89,6 +92,7 @@ int rc_connect_tcp(struct render_client *rc, const char *addr, uint16_t port)
     memset(rc, 0, sizeof(*rc));
     rc->fd = fd;
     rc->db.fd = -1;
+    rc->vfd = -1;
     rc->next_seq = 1;
     return 0;
 }
@@ -101,6 +105,7 @@ static int rc_map_shm(struct render_client *rc, int fd, size_t size)
         return -1;
     memset(rc, 0, sizeof(*rc));
     rc->db.fd = -1;
+    rc->vfd = -1;
     if (rshm_attach(&rc->shm, base, size, RC_SHM_ATTACH_TIMEOUT) < 0) {
         fprintf(stderr, "render_client: no valid shm layout found"
                 " (is renderd --shm running?)\n");
@@ -121,6 +126,7 @@ int rc_attach_shm(struct render_client *rc, void *base, size_t size,
     memset(rc, 0, sizeof(*rc));
     rc->fd = -1;
     rc->db.fd = -1;
+    rc->vfd = -1;
     if (rshm_attach(&rc->shm, base, size, RC_SHM_ATTACH_TIMEOUT) < 0)
         return -1;
     rc->use_shm = 1;
@@ -306,6 +312,105 @@ int rc_connect_doorbell(struct render_client *rc)
     return 0;
 }
 
+/*
+ * Phase 4: the virtio_rproto character device. One ioctl carries the
+ * request and brings back the reply, because that is exactly what one
+ * virtqueue descriptor chain does.
+ */
+int rc_connect_virtio(struct render_client *rc, const char *devpath)
+{
+    uint32_t msg_max = 0;
+    int fd = open(devpath, O_RDWR | O_CLOEXEC);
+
+    if (fd < 0) {
+        fprintf(stderr, "render_client: open %s: %s"
+                " (is virtio_rproto loaded?)\n", devpath, strerror(errno));
+        return -1;
+    }
+    if (ioctl(fd, VIRTIO_RPROTO_IOC_MSG_MAX, &msg_max) < 0) {
+        fprintf(stderr, "render_client: %s is not a virtio_rproto device\n",
+                devpath);
+        close(fd);
+        return -1;
+    }
+    if (msg_max < RPROTO_HDR_SIZE + RPROTO_MAX_PAYLOAD) {
+        fprintf(stderr, "render_client: driver carries at most %u bytes,"
+                " protocol needs %u\n", msg_max,
+                RPROTO_HDR_SIZE + RPROTO_MAX_PAYLOAD);
+        close(fd);
+        return -1;
+    }
+    memset(rc, 0, sizeof(*rc));
+    rc->fd = -1;
+    rc->db.fd = -1;
+    rc->vfd = fd;
+    rc->next_seq = 1;
+    fprintf(stderr, "render_client: virtio transport ready (%s)\n", devpath);
+    return 0;
+}
+
+static int rc_virtio_xfer(struct render_client *rc, uint32_t type,
+                          uint32_t seq, const uint8_t *payload,
+                          uint32_t payload_len, struct rproto_hdr *hdr,
+                          uint8_t *rbuf, uint32_t rcap)
+{
+    uint8_t req[RPROTO_HDR_SIZE + RPROTO_MAX_PAYLOAD];
+    uint8_t resp[RPROTO_HDR_SIZE + RPROTO_MAX_PAYLOAD];
+    struct rproto_hdr h = { .type = type, .seq = seq,
+                            .payload_len = payload_len };
+    struct virtio_rproto_xfer x;
+
+    if (payload_len > RPROTO_MAX_PAYLOAD)
+        return -1;
+    rproto_encode_hdr(req, &h);
+    if (payload_len)
+        memcpy(req + RPROTO_HDR_SIZE, payload, payload_len);
+
+    memset(&x, 0, sizeof(x));
+    x.request = (uint64_t)(uintptr_t)req;
+    x.request_len = RPROTO_HDR_SIZE + payload_len;
+    x.response = (uint64_t)(uintptr_t)resp;
+    x.response_cap = (uint32_t)sizeof(resp);
+    if (ioctl(rc->vfd, VIRTIO_RPROTO_IOC_XFER, &x) < 0) {
+        fprintf(stderr, "render_client: virtio transfer: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if (x.response_len < RPROTO_HDR_SIZE ||
+        rproto_decode_hdr(resp, x.response_len, hdr) < 0)
+        return -1;
+    if (hdr->payload_len > rcap ||
+        RPROTO_HDR_SIZE + hdr->payload_len > x.response_len)
+        return -1;
+    memcpy(rbuf, resp + RPROTO_HDR_SIZE, hdr->payload_len);
+    return 0;
+}
+
+/*
+ * One request out, one reply in — the shape every transport ultimately
+ * has, so the message-building code above never needs to know which one
+ * is in use.
+ */
+static int rc_xfer(struct render_client *rc, uint32_t type, uint32_t seq,
+                   const uint8_t *payload, uint32_t payload_len,
+                   struct rproto_hdr *hdr, uint8_t *rbuf, uint32_t rcap)
+{
+    if (rc->vfd >= 0)
+        return rc_virtio_xfer(rc, type, seq, payload, payload_len,
+                              hdr, rbuf, rcap);
+    if (rc->use_shm) {
+        if (rshm_msg_send_n(&rc->shm.g2h, type, seq, payload, payload_len,
+                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
+            return -1;
+        return rshm_msg_recv_n(&rc->shm.h2g, hdr, rbuf, rcap,
+                               RC_SHM_IO_TIMEOUT, rc->notifier_p) == 0
+               ? 0 : -1;
+    }
+    if (rproto_send(rc->fd, type, seq, payload, payload_len) < 0)
+        return -1;
+    return rproto_recv(rc->fd, hdr, rbuf, rcap) == 0 ? 0 : -1;
+}
+
 /* Send one request and wait for the matching STATUS reply. */
 static int rc_call(struct render_client *rc, uint32_t type,
                    const uint8_t *payload, uint32_t payload_len)
@@ -315,19 +420,9 @@ static int rc_call(struct render_client *rc, uint32_t type,
     struct rproto_status_msg st;
     uint32_t seq = rc->next_seq++;
 
-    if (rc->use_shm) {
-        if (rshm_msg_send_n(&rc->shm.g2h, type, seq, payload, payload_len,
-                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
-            return -1;
-        if (rshm_msg_recv_n(&rc->shm.h2g, &hdr, rbuf, sizeof(rbuf),
-                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
-            return -1;
-    } else {
-        if (rproto_send(rc->fd, type, seq, payload, payload_len) < 0)
-            return -1;
-        if (rproto_recv(rc->fd, &hdr, rbuf, sizeof(rbuf)) != 0)
-            return -1;
-    }
+    if (rc_xfer(rc, type, seq, payload, payload_len, &hdr, rbuf,
+                sizeof(rbuf)) != 0)
+        return -1;
     if (hdr.type != RPROTO_MSG_STATUS ||
         rproto_dec_status(rbuf, hdr.payload_len, &st) < 0)
         return -1;
@@ -352,19 +447,9 @@ int rc_hello(struct render_client *rc)
     uint32_t len = rproto_enc_hello(buf, &hello);
     uint32_t seq = rc->next_seq++;
 
-    if (rc->use_shm) {
-        if (rshm_msg_send_n(&rc->shm.g2h, RPROTO_MSG_HELLO, seq, buf, len,
-                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
-            return -1;
-        if (rshm_msg_recv_n(&rc->shm.h2g, &hdr, buf, sizeof(buf),
-                            RC_SHM_IO_TIMEOUT, rc->notifier_p) != 0)
-            return -1;
-    } else {
-        if (rproto_send(rc->fd, RPROTO_MSG_HELLO, seq, buf, len) < 0)
-            return -1;
-        if (rproto_recv(rc->fd, &hdr, buf, sizeof(buf)) != 0)
-            return -1;
-    }
+    if (rc_xfer(rc, RPROTO_MSG_HELLO, seq, buf, len, &hdr, buf,
+                sizeof(buf)) != 0)
+        return -1;
     if (hdr.type != RPROTO_MSG_HELLO_ACK ||
         rproto_dec_hello_ack(buf, hdr.payload_len, &ack) < 0 ||
         ack.magic != RPROTO_MAGIC || ack.ver_major != RPROTO_VER_MAJOR)
@@ -569,6 +654,10 @@ void rc_close(struct render_client *rc)
         rc->shm_base = NULL;
         rc->use_shm = 0;
     }
+    if (rc->vfd >= 0) {
+        close(rc->vfd);
+        rc->vfd = -1;
+    }
     if (rc->fd >= 0) {
         close(rc->fd);
         rc->fd = -1;
@@ -577,7 +666,7 @@ void rc_close(struct render_client *rc)
 
 static const char *g_transport_usage =
     "--unix PATH | --vsock CID PORT | --tcp ADDR PORT"
-    " | --shm-file PATH | --shm-pci | --doorbell";
+    " | --shm-file PATH | --shm-pci | --doorbell | --virtio [DEVICE]";
 
 const char *rc_transport_usage(void)
 {
@@ -602,6 +691,14 @@ int rc_connect_argv(struct render_client *rc, int argc, char **argv)
         return rc_connect_shm_pci(rc) == 0 ? 1 : -1;
     if (argc >= 1 && strcmp(argv[0], "--doorbell") == 0)
         return rc_connect_doorbell(rc) == 0 ? 1 : -1;
+    if (argc >= 1 && strcmp(argv[0], "--virtio") == 0) {
+        /* An optional device path follows; anything starting with "--"
+         * is the next option, not a path. */
+        int have_path = argc >= 2 && strncmp(argv[1], "--", 2) != 0;
+        const char *dev = have_path ? argv[1] : VIRTIO_RPROTO_DEVPATH;
+
+        return rc_connect_virtio(rc, dev) == 0 ? (have_path ? 2 : 1) : -1;
+    }
 
     fprintf(stderr, "render_client: expected a transport: %s\n",
             g_transport_usage);

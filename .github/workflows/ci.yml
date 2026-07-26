@@ -16,15 +16,16 @@ jobs:
       - name: Test
         run: make test
 
-  # Boots the real guest image under QEMU and drives the renderer from
-  # inside the guest over every transport: tcp via slirp, ivshmem-plain
-  # polled, vsock (GitHub runners provide KVM and can load vhost_vsock),
-  # and ivshmem-doorbell through the guest kernel module. The ~600 MB base
-  # image is downloaded each run and verified against the pinned SHA256;
-  # no cache action is used so all dependencies stay SHA-pinned.
+  # Boots the real guest image under QEMU (three times) and drives the
+  # renderer from inside the guest over every transport: tcp via slirp,
+  # ivshmem-plain polled, vsock (GitHub runners provide KVM and can load
+  # vhost_vsock), ivshmem-doorbell through the guest kernel module, and
+  # vhost-user through the guest virtio driver. The ~600 MB base image is
+  # downloaded each run and verified against the pinned SHA256; no cache
+  # action is used so all dependencies stay SHA-pinned.
   vm-e2e:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install QEMU and the guest kernel headers

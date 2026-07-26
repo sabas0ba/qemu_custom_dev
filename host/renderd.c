@@ -29,6 +29,11 @@
  * and the notification eventfds to QEMU's ivshmem-doorbell device. Same
  * rings as --shm, but each side is woken by an interrupt instead of
  * spinning on the ring.
+ *
+ * --vhost-user is the Phase 4 transport: we are the vhost-user backend
+ * behind QEMU's generic vhost-user-device, so the guest sees a real
+ * virtio device and the messages ride a split vring in guest RAM rather
+ * than a ring we invented. See host/vhost_user.c.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -50,6 +55,7 @@
 #include "ivshmem.h"
 #include "rproto.h"
 #include "rproto_shm.h"
+#include "vhost_user.h"
 
 /*
  * Transport-independent session I/O. recv follows rproto_recv semantics
@@ -508,6 +514,20 @@ static int shm_send(void *ctx, uint32_t type, uint32_t seq,
     return r == 0 ? 0 : -1;
 }
 
+/* Phase 4: the vring itself carries request and reply, so the pair maps
+ * straight onto the transport callbacks. */
+static int vu_io_recv(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
+                      uint32_t cap)
+{
+    return vu_recv(ctx, hdr, payload, cap);
+}
+
+static int vu_io_send(void *ctx, uint32_t type, uint32_t seq,
+                      const uint8_t *payload, uint32_t payload_len)
+{
+    return vu_send_reply(ctx, type, seq, payload, payload_len);
+}
+
 /* Phase 3 notification, backed by the ivshmem server's eventfds. */
 static int db_notify(void *ctx)
 {
@@ -642,7 +662,8 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT |"
-            " --shm FILE | --ivshmem SOCKET) [--out DIR] [--once]\n");
+            " --shm FILE | --ivshmem SOCKET | --vhost-user SOCKET)"
+            " [--out DIR] [--once]\n");
 }
 
 int main(int argc, char **argv)
@@ -650,6 +671,7 @@ int main(int argc, char **argv)
     const char *unix_path = NULL;
     const char *shm_path = NULL;
     const char *ivshmem_path = NULL;
+    const char *vhost_user_path = NULL;
     long vsock_port = -1;
     long tcp_port = -1;
     int once = 0;
@@ -666,6 +688,8 @@ int main(int argc, char **argv)
             shm_path = argv[++i];
         } else if (strcmp(argv[i], "--ivshmem") == 0 && i + 1 < argc) {
             ivshmem_path = argv[++i];
+        } else if (strcmp(argv[i], "--vhost-user") == 0 && i + 1 < argc) {
+            vhost_user_path = argv[++i];
         } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             g_outdir = argv[++i];
         } else if (strcmp(argv[i], "--once") == 0) {
@@ -676,7 +700,8 @@ int main(int argc, char **argv)
         }
     }
     if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) +
-            (shm_path != NULL) + (ivshmem_path != NULL) != 1) {
+            (shm_path != NULL) + (ivshmem_path != NULL) +
+            (vhost_user_path != NULL) != 1) {
         usage();
         return 2;
     }
@@ -707,6 +732,25 @@ int main(int argc, char **argv)
             fprintf(stderr, "renderd: shm session ended\n");
             rshm_reset_rings(&shm);
         } while (!once);
+        return 0;
+    }
+
+    if (vhost_user_path) {
+        static struct vu_dev vu;
+        struct rio io = { .recv = vu_io_recv, .send = vu_io_send, .ctx = &vu };
+
+        if (vu_listen(&vu, vhost_user_path) < 0) {
+            fprintf(stderr, "renderd: cannot listen on %s\n", vhost_user_path);
+            return 1;
+        }
+        fprintf(stderr, "renderd: vhost-user backend on %s\n",
+                vhost_user_path);
+        do {
+            serve(&io);
+            fprintf(stderr, "renderd: vhost-user session ended\n");
+        } while (!once);
+        vu_close(&vu);
+        unlink(vhost_user_path);
         return 0;
     }
 

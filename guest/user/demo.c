@@ -14,6 +14,7 @@
  *   demo --shm-file PATH        (Phase 2 shm transport over a plain file)
  *   demo --shm-pci              (Phase 2, from a guest, polled)
  *   demo --doorbell             (Phase 3, from a guest, interrupt-driven)
+ *   demo --virtio               (Phase 4, from a guest, over a virtqueue)
  *
  * With a trailing --blit the same scene is composited from pixels staged
  * in shared memory (protocol v0.2) rather than drawn with FILL_RECT; the

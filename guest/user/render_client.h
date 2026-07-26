@@ -23,6 +23,7 @@ struct rc_doorbell {
 
 struct render_client {
     int fd;          /* stream transports; -1 otherwise */
+    int vfd;         /* /dev/virtio-rproto (Phase 4); -1 otherwise */
     int use_shm;
     struct rshm shm;
     void *shm_base;
@@ -50,6 +51,13 @@ int rc_connect_shm_pci(struct render_client *rc);
  * kernel module, with interrupts instead of polling. Requires the module
  * to be loaded and root to open its character device. */
 int rc_connect_doorbell(struct render_client *rc);
+/* Phase 4 vhost-user transport: the virtqueue of QEMU's generic
+ * vhost-user device, reached through the virtio_rproto kernel module.
+ * Requires the module to be loaded and root to open its character
+ * device. Unlike the shared-memory transports there is no staging area:
+ * every message travels in the descriptor chain, so BLIT is unavailable
+ * (rc_staging returns NULL). */
+int rc_connect_virtio(struct render_client *rc, const char *devpath);
 
 /*
  * Attach to a shared region somebody else already mapped, with an
@@ -64,7 +72,7 @@ int rc_attach_shm(struct render_client *rc, void *base, size_t size,
 /*
  * Parse one transport spec from argv[0..argc-1] and connect. Recognises
  *   --unix PATH | --vsock CID PORT | --tcp ADDR PORT
- *   --shm-file PATH | --shm-pci | --doorbell
+ *   --shm-file PATH | --shm-pci | --doorbell | --virtio [DEVICE]
  * Returns the number of arguments consumed, or -1 on an unknown or
  * incomplete spec (after printing the accepted forms).
  */

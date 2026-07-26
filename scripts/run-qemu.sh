@@ -36,6 +36,15 @@
 #              guest unable to tell them apart.
 #   IVSHMEM_VECTORS  MSI-X vectors on that device, must match the server's
 #              --vectors (default 1)
+#   VHOST_USER  path to a vhost-user backend socket (Phase 4). Start
+#              `renderd --vhost-user $VHOST_USER` first; QEMU connects to
+#              it and exposes a generic virtio device to the guest. Guest
+#              RAM is switched to a shared memfd backing, without which
+#              the backend could not map it.
+#   VHOST_USER_VIRTIO_ID  virtio device ID the guest sees (default 37).
+#              QEMU only accepts IDs it has a name for, so this is not a
+#              free choice; guest/kmod/virtio_rproto binds the same
+#              number. See docs/vhost-user.md.
 #
 # Inside the guest, the share appears at /mnt/repo (read-only; mounted by
 # cloud-init). Build in a writable copy and connect to the host daemon:
@@ -58,6 +67,8 @@ IVSHMEM="${IVSHMEM:-}"
 IVSHMEM_SIZE="${IVSHMEM_SIZE:-4M}"
 IVSHMEM_SOCKET="${IVSHMEM_SOCKET:-}"
 IVSHMEM_VECTORS="${IVSHMEM_VECTORS:-1}"
+VHOST_USER="${VHOST_USER:-}"
+VHOST_USER_VIRTIO_ID="${VHOST_USER_VIRTIO_ID:-37}"
 
 args=(
     -machine q35,accel="$ACCEL"
@@ -68,6 +79,22 @@ args=(
     -nic user,model=virtio-net-pci
     -nographic
 )
+if [ -n "$VHOST_USER" ]; then
+    [ -S "$VHOST_USER" ] || { echo "run-qemu: no vhost-user socket at" \
+        "$VHOST_USER (start renderd --vhost-user first)" >&2; exit 1; }
+    # A vhost-user backend maps guest RAM by fd, so the machine's memory
+    # has to be a shareable object rather than anonymous memory.
+    args+=(
+        -object memory-backend-memfd,id=vumem,size="$MEM",share=on
+        -machine memory-backend=vumem
+        # No reconnect= here: it makes the chardev connect asynchronously,
+        # so the socket is not up yet when the device is realised and
+        # QEMU fails the first fd-carrying request with
+        # "Failed to set msg fds."
+        -chardev socket,path="$VHOST_USER",id=vurender
+        -device vhost-user-device-pci,chardev=vurender,virtio-id="$VHOST_USER_VIRTIO_ID",num_vqs=1
+    )
+fi
 if [ "$GUEST_CID" = none ]; then
     :
 elif [ -e /dev/vhost-vsock ]; then

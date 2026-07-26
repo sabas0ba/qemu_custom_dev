@@ -3,8 +3,10 @@
 # Full-stack test: boot the real guest image under QEMU and drive the
 # renderer from INSIDE the guest against daemons on the host.
 #
-# Two boots, because both ivshmem flavours answer to the same PCI ID and a
-# guest holding one of each could not tell them apart:
+# Three boots. Two of them because both ivshmem flavours answer to the same
+# PCI ID and a guest holding one of each could not tell them apart; the
+# third because vhost-user needs a different memory backing for the whole
+# machine:
 #
 #   boot 1  tcp (always), ivshmem-plain polled (always), vsock (when
 #           /dev/vhost-vsock exists), plus a latency measurement over the
@@ -15,6 +17,9 @@
 #           protocol v0.2 zero-copy pixel path (BLIT out of the shared
 #           staging area), both measured and checked against the frame
 #           boot 1 drew with commands
+#   boot 3  vhost-user: a real virtio queue serviced by renderd as a
+#           vhost-user backend, driven by the virtio_rproto kernel module,
+#           with the same measurement again
 #
 # The guest runs unattended: cloud-init's runcmd executes statically
 # linked binaries from the 9p-shared repo and powers the guest off. No
@@ -42,7 +47,7 @@ echo "vm-e2e: accel=$ACCEL vsock=$HAVE_VSOCK"
 
 rm -rf "$TMP"
 mkdir -p "$TMP/frames-tcp" "$TMP/frames-vsock" "$TMP/frames-shm" \
-         "$TMP/frames-doorbell"
+         "$TMP/frames-doorbell" "$TMP/frames-vhost-user"
 
 make -C "$ROOT" all build/demo-static build/bench-static >/dev/null
 "$ROOT/scripts/build-kmod.sh"
@@ -185,16 +190,65 @@ echo "vm-e2e: doorbell transport OK"
 cmp "$TMP/frames-doorbell/frame-000001.ppm" "$TMP/frames-shm/frame-000001.ppm"
 echo "vm-e2e: blit matches the command-drawn frame OK"
 
+# ---------------------------------------------------------------- boot 3
+VUSOCK="$TMP/vu.sock"
+"$BUILD/renderd" --vhost-user "$VUSOCK" --out "$TMP/frames-vhost-user" --once \
+    >"$TMP/vhost-user.log" 2>&1 &
+VU_PID=$!
+cleanup3() {
+    kill "$VU_PID" 2>/dev/null || true
+    wait "$VU_PID" 2>/dev/null || true
+}
+trap cleanup3 EXIT
+
+# QEMU connects to the backend as a client, so the socket has to exist
+# before the guest starts or the device fails to realise.
+for _ in $(seq 1 100); do
+    [ -S "$VUSOCK" ] && break
+    sleep 0.05
+done
+[ -S "$VUSOCK" ] || { echo "vm-e2e: vhost-user socket not created" >&2; exit 1; }
+
+# No --blit here: this transport has no shared staging area, every byte
+# travels in the descriptor chain.
+AUTORUN="$WAIT_MOUNT; insmod /mnt/repo/guest/kmod/virtio_rproto.ko"
+AUTORUN="$AUTORUN; /mnt/repo/build/bench-static --virtio --iters $BENCH_ITERS --scene"
+AUTORUN="$AUTORUN; poweroff"
+
+VHOST_USER="$VUSOCK" boot_guest vhost-user "$AUTORUN"
+cleanup3
+trap - EXIT
+
+LOG3="$TMP/console-vhost-user.log"
+if ! grep -q "virtio transport ready" "$LOG3"; then
+    echo "vm-e2e: the guest never reached the virtio transport;" \
+         "last console output:" >&2
+    tail -40 "$LOG3" >&2
+    exit 1
+fi
+check_frame "$TMP/frames-vhost-user/frame-000001.ppm" "$LOG3"
+echo "vm-e2e: vhost-user transport OK"
+
+# Same scene, same commands, a completely different transport: the frames
+# have to be identical byte for byte.
+cmp "$TMP/frames-vhost-user/frame-000001.ppm" "$TMP/frames-shm/frame-000001.ppm"
+echo "vm-e2e: vhost-user frame matches the shared-memory frame OK"
+
+# All three phases measured the same round trip from inside the guest.
 POLL_MEAN="$(bench_value "$LOG1" mean_us || true)"
 POLL_P50="$(bench_value "$LOG1" p50_us || true)"
 DB_MEAN="$(bench_value "$LOG2" mean_us || true)"
 DB_P50="$(bench_value "$LOG2" p50_us || true)"
+VU_MEAN="$(bench_value "$LOG3" mean_us || true)"
+VU_P50="$(bench_value "$LOG3" p50_us || true)"
 echo "vm-e2e: round-trip latency over $BENCH_ITERS iterations (accel=$ACCEL)"
 printf 'vm-e2e:   %-22s mean %8s us   p50 %8s us\n' \
     "shm polled (Phase 2)" "${POLL_MEAN:-n/a}" "${POLL_P50:-n/a}"
 printf 'vm-e2e:   %-22s mean %8s us   p50 %8s us\n' \
     "doorbell (Phase 3)" "${DB_MEAN:-n/a}" "${DB_P50:-n/a}"
-[ -n "$POLL_MEAN" ] && [ -n "$DB_MEAN" ] || \
+printf 'vm-e2e:   %-22s mean %8s us   p50 %8s us\n' \
+    "vhost-user (Phase 4)" "${VU_MEAN:-n/a}" "${VU_P50:-n/a}"
+[ -n "$POLL_MEAN" ] && [ -n "$DB_MEAN" ] && [ -n "$VU_MEAN" ] || \
     echo "vm-e2e: WARNING benchmark numbers incomplete" >&2
 
 BLIT_MIB="$(bench_value "$LOG2" blit_throughput_mib_s || true)"

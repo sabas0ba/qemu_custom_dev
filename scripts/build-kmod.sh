@@ -18,8 +18,9 @@
 #       there is no host to keep clean and pulling an image is just
 #       overhead.
 #
-# Either way the output is guest/kmod/ivshmem_rproto.ko, built with the
-# same Kbuild makefile.
+# Either way the output is guest/kmod/ivshmem_rproto.ko (Phase 3) and
+# guest/kmod/virtio_rproto.ko (Phase 4), built with the same Kbuild
+# makefile.
 #
 # Usage:
 #   scripts/build-kmod.sh [--direct|--container]
@@ -83,6 +84,8 @@ else
     make -C "$ROOT/guest/kmod" "KDIR=/lib/modules/$KVER/build"
 fi
 
-KO="$ROOT/guest/kmod/ivshmem_rproto.ko"
-[ -f "$KO" ] || die "build produced no module"
-echo "build-kmod: $KO"
+for ko in ivshmem_rproto virtio_rproto; do
+    KO="$ROOT/guest/kmod/$ko.ko"
+    [ -f "$KO" ] || die "build produced no $ko.ko"
+    echo "build-kmod: $KO"
+done

@@ -17,7 +17,7 @@ BINS := $(BUILD)/renderd $(BUILD)/ivshmemd $(BUILD)/demo $(BUILD)/bench \
 	$(BUILD)/test_proto $(BUILD)/test_shm $(BUILD)/ivshmem_peer \
 	$(BUILD)/ppm_check
 
-RENDERD_SRCS := host/renderd.c host/ivshmem.c $(PROTO_SRCS)
+RENDERD_SRCS := host/renderd.c host/ivshmem.c host/vhost_user.c $(PROTO_SRCS)
 CLIENT_SRCS  := guest/user/render_client.c $(PROTO_SRCS)
 DEMO_SRCS    := guest/user/demo.c $(CLIENT_SRCS)
 BENCH_SRCS   := guest/user/bench.c $(CLIENT_SRCS)
@@ -32,7 +32,8 @@ all: $(BINS)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/renderd: $(RENDERD_SRCS) $(PROTO_HDRS) host/ivshmem.h | $(BUILD)
+$(BUILD)/renderd: $(RENDERD_SRCS) $(PROTO_HDRS) host/ivshmem.h \
+		host/vhost_user.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Ihost -o $@ $(RENDERD_SRCS)
 
 $(BUILD)/ivshmemd: host/ivshmemd.c host/ivshmem.c host/ivshmem.h | $(BUILD)

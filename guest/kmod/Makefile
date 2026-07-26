@@ -8,6 +8,7 @@
 #
 #   make -C guest/kmod KDIR=/lib/modules/6.8.0-134-generic/build
 obj-m += ivshmem_rproto.o
+obj-m += virtio_rproto.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
