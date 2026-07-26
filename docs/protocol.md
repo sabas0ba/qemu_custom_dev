@@ -8,12 +8,13 @@ Phase 1 では vsock（開発時は AF_UNIX）、Phase 2 以降は共有メモ�
 実装: `proto/rproto.h` / `proto/rproto.c`（コーデック）、
 `proto/rproto_io.c`（ストリーム fd 用フレーミング I/O）。
 
-輸送層は現在 5 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
+輸送層は現在 6 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
 テスト用）、**TCP**（vhost-vsock が使えないコンテナ・CI 用。ゲストからは
 slirp の `10.0.2.2` でホストに届く）、**共有メモリ（ポーリング）**（Phase 2、
 ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 **共有メモリ（割り込み駆動）**（Phase 3、ivshmem-doorbell。
-[doorbell-transport.md](doorbell-transport.md)）。
+[doorbell-transport.md](doorbell-transport.md)）、
+**virtqueue**（Phase 4、vhost-user。[vhost-user.md](vhost-user.md)）。
 いずれもメッセージのワイヤ形式は同一で、運び方だけが異なる。
 
 ## 基本事項
@@ -107,7 +108,8 @@ v0.1 の矩形系（u32）とは扱いが異なる。
 - サーバはソース矩形全体が staging 領域内に収まることを 64bit 演算で
   検証してから 1 バイトも読まない。範囲外・`stride` 不足・w/h が 0 なら
   `ERR_ARG`。
-- ストリーム輸送（vsock/TCP/AF_UNIX）には共有領域がないため `ERR_STATE`。
+- ストリーム輸送（vsock/TCP/AF_UNIX）と virtqueue 輸送には共有領域が
+  ないため `ERR_STATE`。
 
 **順序保証**: クライアントは「staging にピクセルを書く」→「BLIT を送る」の
 順に行う。BLIT の公開はリングの release ストア、サーバ側は acquire ロード
