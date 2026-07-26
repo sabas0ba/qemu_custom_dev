@@ -8,10 +8,12 @@ Phase 1 では vsock（開発時は AF_UNIX）、Phase 2 以降は共有メモ�
 実装: `proto/rproto.h` / `proto/rproto.c`（コーデック）、
 `proto/rproto_io.c`（ストリーム fd 用フレーミング I/O）。
 
-輸送層は現在 4 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
+輸送層は現在 5 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
 テスト用）、**TCP**（vhost-vsock が使えないコンテナ・CI 用。ゲストからは
-slirp の `10.0.2.2` でホストに届く）、**共有メモリ**（Phase 2、
-ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）。
+slirp の `10.0.2.2` でホストに届く）、**共有メモリ（ポーリング）**（Phase 2、
+ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
+**共有メモリ（割り込み駆動）**（Phase 3、ivshmem-doorbell。
+[doorbell-transport.md](doorbell-transport.md)）。
 いずれもメッセージのワイヤ形式は同一で、運び方だけが異なる。
 
 ## 基本事項

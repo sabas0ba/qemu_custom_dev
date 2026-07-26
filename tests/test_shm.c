@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Unit tests for the shared-memory ring transport (proto/rproto_shm.c). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +22,7 @@ static void test_init_attach(void)
     void *mem = calloc(1, RSHM_DEFAULT_SIZE);
     struct rshm host, guest;
 
-    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE) == 0);
+    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE, -1) == 0);
     CHECK(rshm_attach(&guest, mem, RSHM_DEFAULT_SIZE, 0) == 0);
     CHECK(guest.hdr->total_size == RSHM_DEFAULT_SIZE);
     CHECK(guest.g2h.size == RSHM_RING_SIZE);
@@ -30,7 +31,7 @@ static void test_init_attach(void)
     /* init on a too-small region must fail */
     struct rshm tiny;
 
-    CHECK(rshm_init(&tiny, mem, 1024) == -1);
+    CHECK(rshm_init(&tiny, mem, 1024, -1) == -1);
     free(mem);
 }
 
@@ -53,7 +54,7 @@ static void test_roundtrip(void)
     uint8_t payload[RPROTO_MAX_PAYLOAD];
     uint8_t out[RPROTO_MAX_PAYLOAD];
 
-    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE) == 0);
+    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE, -1) == 0);
     CHECK(rshm_attach(&guest, mem, RSHM_DEFAULT_SIZE, 0) == 0);
 
     /* empty ring: recv would block */
@@ -91,7 +92,7 @@ static void test_fill_and_wraparound(void)
     uint8_t out[RPROTO_MAX_PAYLOAD];
     uint32_t sent = 0, received = 0;
 
-    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE) == 0);
+    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE, -1) == 0);
     CHECK(rshm_attach(&guest, mem, RSHM_DEFAULT_SIZE, 0) == 0);
 
     /* fill the ring until it reports no space */
@@ -148,7 +149,7 @@ static void test_reset(void)
     struct rproto_hdr hdr;
     uint8_t out[RPROTO_MAX_PAYLOAD];
 
-    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE) == 0);
+    CHECK(rshm_init(&host, mem, RSHM_DEFAULT_SIZE, -1) == 0);
     CHECK(rshm_attach(&guest, mem, RSHM_DEFAULT_SIZE, 0) == 0);
     CHECK(rshm_msg_try_send(&guest.g2h, 3, 1, NULL, 0) == 0);
     rshm_reset_rings(&host);

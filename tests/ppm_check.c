@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ppm_check - assert the color of one pixel in a binary PPM (P6) file.
  *

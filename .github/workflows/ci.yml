@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 name: ci
 
 on:
@@ -15,9 +16,10 @@ jobs:
       - name: Test
         run: make test
 
-  # Boots the real guest image under QEMU and runs the demo from inside the
-  # guest: tcp transport via slirp, plus the actual Phase 1 vsock transport
-  # (GitHub runners provide KVM and can load vhost_vsock). The ~600 MB base
+  # Boots the real guest image under QEMU and drives the renderer from
+  # inside the guest over every transport: tcp via slirp, ivshmem-plain
+  # polled, vsock (GitHub runners provide KVM and can load vhost_vsock),
+  # and ivshmem-doorbell through the guest kernel module. The ~600 MB base
   # image is downloaded each run and verified against the pinned SHA256;
   # no cache action is used so all dependencies stay SHA-pinned.
   vm-e2e:
@@ -25,14 +27,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install QEMU
+      - name: Install QEMU and the guest kernel headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage
+          sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage \
+            linux-headers-6.8.0-134-generic
       - name: Enable KVM and vhost-vsock
         run: |
           sudo modprobe vhost_vsock || echo "vhost_vsock unavailable, vsock leg will be skipped"
           [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm || true
           [ -e /dev/vhost-vsock ] && sudo chmod 666 /dev/vhost-vsock || true
       - name: Run VM end-to-end test
+        # The runner is disposable, so build the guest module against the
+        # headers installed above instead of spinning up the container.
+        env:
+          KMOD_MODE: direct
         run: tests/vm-e2e.sh

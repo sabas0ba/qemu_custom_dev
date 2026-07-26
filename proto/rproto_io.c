@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * rproto_io.c - framed message I/O over a connected stream fd.
  *

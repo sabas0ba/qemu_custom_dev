@@ -3,8 +3,8 @@
 Phase 1 のプロトコル（[protocol.md](protocol.md)）を、ivshmem-plain の
 共有メモリ上のリングで運ぶ輸送層。メッセージのワイヤ形式（12 バイト
 ヘッダ + ペイロード）は**ストリーム輸送と完全に同一**で、差し替わるのは
-運び方だけ。通知はポーリング（Phase 3 で ivshmem-doorbell による割り込み
-駆動に置き換え、レイテンシ・スループットを比較する）。
+運び方だけ。通知はポーリング。Phase 3 では同じリングのまま通知だけを
+ivshmem-doorbell の割り込みに差し替える（[doorbell-transport.md](doorbell-transport.md)）。
 
 実装: `proto/rproto_shm.h` / `proto/rproto_shm.c`
 

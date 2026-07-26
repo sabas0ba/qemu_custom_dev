@@ -2,5 +2,14 @@
 build/
 *.o
 
+# Kernel module build artifacts (kbuild leaves these next to the sources)
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.*.cmd
+guest/kmod/.tmp_versions/
+
 # Working directory for temporary files (repo policy: keep temp files here)
 .tmp/

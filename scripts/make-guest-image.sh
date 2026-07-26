@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Build the Phase 1 guest disk image and cloud-init seed ISO.
 #
 # Downloads a pinned Ubuntu cloud image (verified against a pinned SHA256),
@@ -26,7 +27,10 @@
 #   AUTORUN_CMD optional shell command run (as root) by cloud-init at the
 #               end of first boot. Used by tests/vm-e2e.sh for unattended
 #               runs. When set, package installation is skipped so the
-#               boot needs no external network access.
+#               boot needs no external network access. Its output is sent
+#               to the serial console (cloud-init otherwise keeps runcmd
+#               output inside the guest), so the caller can read results
+#               out of the console log.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -120,7 +124,7 @@ EOF
     if [ -n "$AUTORUN_CMD" ]; then
         cat >> "$OUT/user-data" <<EOF
 runcmd:
-  - [sh, -c, '${AUTORUN_CMD}']
+  - [sh, -c, '{ ${AUTORUN_CMD} ; } > /dev/console 2>&1']
 EOF
     fi
 }
