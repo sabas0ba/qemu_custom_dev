@@ -1,4 +1,4 @@
-# レンダラプロトコル v0.2
+# レンダラプロトコル v0.3
 
 ホスト側レンダラデーモン（`host/renderd`）とゲストクライアントの間で使う
 コマンドプロトコルの定義。**輸送層に依存しない**ことが設計の中心で、
@@ -8,12 +8,13 @@ Phase 1 では vsock（開発時は AF_UNIX）、Phase 2 以降は共有メモ�
 実装: `proto/rproto.h` / `proto/rproto.c`（コーデック）、
 `proto/rproto_io.c`（ストリーム fd 用フレーミング I/O）。
 
-輸送層は現在 5 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
+輸送層は現在 6 種: **vsock**（Phase 1 本来の輸送）、**AF_UNIX**（ローカル
 テスト用）、**TCP**（vhost-vsock が使えないコンテナ・CI 用。ゲストからは
 slirp の `10.0.2.2` でホストに届く）、**共有メモリ（ポーリング）**（Phase 2、
 ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 **共有メモリ（割り込み駆動）**（Phase 3、ivshmem-doorbell。
-[doorbell-transport.md](doorbell-transport.md)）。
+[doorbell-transport.md](doorbell-transport.md)）、
+**virtqueue**（Phase 4、vhost-user。[vhost-user.md](vhost-user.md)）。
 いずれもメッセージのワイヤ形式は同一で、運び方だけが異なる。
 
 ## 基本事項
@@ -60,6 +61,13 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 | 7    | GOODBYE         | C→S  | なし                              | 0    |
 | 8    | STATUS          | S→C  | status u32, seq_ref u32           | 8    |
 | 9    | BLIT (v0.2)     | C→S  | src_off u32, stride u32, x,y,w,h u32×4 | 24 |
+| 10   | SET_BLEND (v0.3)| C→S  | mode u32                          | 4    |
+| 11   | DRAW_LINE (v0.3)| C→S  | x0,y0,x1,y1 i32×4, rgba u32       | 20   |
+| 12   | DRAW_TRIANGLE (v0.3) | C→S | x0,y0,x1,y1,x2,y2 i32×6, rgba u32 | 28 |
+
+v0.3 の座標は**符号付き 32bit**（u32 のスロットに 2 の補数で入る）。
+線や三角形は頂点がサーフェス外にあるのが自然なため、位置指定である
+v0.1 の矩形系（u32）とは扱いが異なる。
 
 ペイロード長は完全一致を要求する（長すぎても短すぎても `ERR_PROTO`）。
 
@@ -80,8 +88,8 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 - `FILL_RECT`: サーフェス境界でクリップする。完全に外側なら何もしない
   （エラーではない）。
 - `PRESENT`: 現在のフレームバッファを `frame-<frame_id 6桁>.ppm`（P6、
-  アルファ破棄）として出力ディレクトリへ書き出す。v0 の「出力先」は
-  暫定でファイル出力（未決定事項。ウィンドウ表示は将来検討）。
+  アルファ破棄）として出力ディレクトリへ書き出す。出力先をファイルに
+  した理由は [renderer.md](renderer.md) にある（決定済み）。
 - `BLIT`（v0.2）: **共有メモリ輸送でのみ有効**。クライアントが共有領域の
   staging 領域（`rshm_hdr.fb_off` 以降）に書いたピクセルを、サーフェスの
   `(x, y)` へ w×h だけ合成する。詳細は下記。
@@ -100,7 +108,8 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 - サーバはソース矩形全体が staging 領域内に収まることを 64bit 演算で
   検証してから 1 バイトも読まない。範囲外・`stride` 不足・w/h が 0 なら
   `ERR_ARG`。
-- ストリーム輸送（vsock/TCP/AF_UNIX）には共有領域がないため `ERR_STATE`。
+- ストリーム輸送（vsock/TCP/AF_UNIX）と virtqueue 輸送には共有領域が
+  ないため `ERR_STATE`。
 
 **順序保証**: クライアントは「staging にピクセルを書く」→「BLIT を送る」の
 順に行う。BLIT の公開はリングの release ストア、サーバ側は acquire ロード
@@ -110,6 +119,21 @@ ivshmem-plain 上の SPSC リング。[shm-transport.md](shm-transport.md)）、
 **能力の判定**: BLIT が使えるかは輸送層で決まるので、専用のネゴシエーションは
 持たない。クライアントは共有メモリ輸送を選んだ時のみ使い、加えて
 `HELLO_ACK` のマイナー版が 2 以上であることを確認する。
+
+## ラスタライザ（v0.3）
+
+`SET_BLEND` / `DRAW_LINE` / `DRAW_TRIANGLE` を追加した。輸送層は問わず、
+すべての輸送で使える（`HELLO_ACK` のマイナー版 3 以上が条件）。
+
+- `SET_BLEND`: 以降の描画の合成モードを切り替える。`0` = 上書き（既定、
+  v0.1/v0.2 と同じ挙動）、`1` = source-over。それ以外は `ERR_ARG`。
+  `CLEAR` だけはモードに関わらず上書き。
+- `DRAW_LINE`: 2 点間を Bresenham で結ぶ。範囲外の画素は捨てる。
+- `DRAW_TRIANGLE`: 塗りつぶし三角形。巻き方向は自由、退化三角形は無描画。
+
+合成式とラスタライズ規則の詳細、および丸めの定義は
+[renderer.md](renderer.md) にある（テストが期待値を手計算で書けるよう、
+すべて整数演算で固定してある）。
 
 ## 将来の互換性方針
 

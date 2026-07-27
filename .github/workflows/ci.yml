@@ -15,16 +15,54 @@ jobs:
         run: make CFLAGS="-O2 -g -Werror"
       - name: Test
         run: make test
+      # The images in docs/ are the renderer's real output, so they must
+      # not drift away from it. Regenerating and comparing is cheap.
+      - name: Check the documentation images against the renderer
+        run: scripts/make-doc-images.sh --check
+      # Frames are written as PPM (trivial to verify byte by byte) but
+      # nothing displays PPM, so convert before uploading.
+      - name: Convert the test frames for viewing
+        if: always()
+        run: scripts/frames-to-png.sh .tmp/e2e || true
+      - name: Upload the test frames
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frames-host
+          path: .tmp/e2e/**/frame-*.*
+          if-no-files-found: warn
 
-  # Boots the real guest image under QEMU and drives the renderer from
-  # inside the guest over every transport: tcp via slirp, ivshmem-plain
-  # polled, vsock (GitHub runners provide KVM and can load vhost_vsock),
-  # and ivshmem-doorbell through the guest kernel module. The ~600 MB base
-  # image is downloaded each run and verified against the pinned SHA256;
-  # no cache action is used so all dependencies stay SHA-pinned.
-  vm-e2e:
+  # The development container is what the README points people at, so it
+  # has to actually work: build the image, then use it exactly the way a
+  # reader would. Building the guest module inside proves the pinned
+  # kernel headers are there, and asking QEMU for its version proves the
+  # emulator is too — without paying for a VM boot, which the vm-e2e job
+  # already covers.
+  dev-container:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build and test inside the development container
+        run: |
+          scripts/dev-container.sh sh -c '
+            set -e
+            qemu-system-x86_64 --version | head -1
+            make CFLAGS="-O2 -g -Werror"
+            make test
+            scripts/build-kmod.sh
+          '
+
+  # Boots the real guest image under QEMU (three times) and drives the
+  # renderer from inside the guest over every transport: tcp via slirp,
+  # ivshmem-plain polled, vsock (GitHub runners provide KVM and can load
+  # vhost_vsock), ivshmem-doorbell through the guest kernel module, and
+  # vhost-user through the guest virtio driver. The ~600 MB base image is
+  # downloaded each run and verified against the pinned SHA256; no cache
+  # action is used so all dependencies stay SHA-pinned.
+  vm-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install QEMU and the guest kernel headers
@@ -43,3 +81,18 @@ jobs:
         env:
           KMOD_MODE: direct
         run: tests/vm-e2e.sh
+      - name: Convert the guest frames for viewing
+        if: always()
+        run: scripts/frames-to-png.sh .tmp/vm-e2e || true
+      # Uploaded on failure too: when a boot goes wrong the console logs
+      # are the only way to see what the guest was doing.
+      - name: Upload the guest frames and console logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frames-guest
+          path: |
+            .tmp/vm-e2e/frames-*/frame-*.*
+            .tmp/vm-e2e/console-*.log
+            .tmp/vm-e2e/*.log
+          if-no-files-found: warn

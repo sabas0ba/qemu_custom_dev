@@ -29,9 +29,15 @@
  * and the notification eventfds to QEMU's ivshmem-doorbell device. Same
  * rings as --shm, but each side is woken by an interrupt instead of
  * spinning on the ring.
+ *
+ * --vhost-user is the Phase 4 transport: we are the vhost-user backend
+ * behind QEMU's generic vhost-user-device, so the guest sees a real
+ * virtio device and the messages ride a split vring in guest RAM rather
+ * than a ring we invented. See host/vhost_user.c.
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +55,7 @@
 #include "ivshmem.h"
 #include "rproto.h"
 #include "rproto_shm.h"
+#include "vhost_user.h"
 
 /*
  * Transport-independent session I/O. recv follows rproto_recv semantics
@@ -75,10 +82,57 @@ struct session {
     int hello_done;
     uint32_t width;
     uint32_t height;
-    uint32_t *fb; /* width*height pixels, 0xRRGGBBAA */
+    uint32_t blend; /* enum rproto_blend; REPLACE unless SET_BLEND says so */
+    uint32_t *fb;   /* width*height pixels, 0xRRGGBBAA */
 };
 
 static const char *g_outdir = ".";
+
+/*
+ * One channel of source-over compositing, rounded to nearest:
+ *   out = (s*a + d*(255-a) + 127) / 255
+ * Integer and exact, so the tests can predict every pixel. See
+ * docs/renderer.md.
+ */
+static uint32_t blend_chan(uint32_t s, uint32_t d, uint32_t a)
+{
+    return (s * a + d * (255u - a) + 127u) / 255u;
+}
+
+/* Combine one source pixel with the destination under the session's mode. */
+static uint32_t blend_px(const struct session *s, uint32_t src, uint32_t dst)
+{
+    uint32_t sa;
+
+    if (s->blend == RPROTO_BLEND_REPLACE)
+        return src;
+    sa = src & 0xffu;
+    if (sa == 255u)
+        return src;
+    if (sa == 0u)
+        return dst;
+    return (blend_chan((src >> 24) & 0xff, (dst >> 24) & 0xff, sa) << 24) |
+           (blend_chan((src >> 16) & 0xff, (dst >> 16) & 0xff, sa) << 16) |
+           (blend_chan((src >> 8) & 0xff, (dst >> 8) & 0xff, sa) << 8) |
+           /*
+            * out alpha = sa + da*(1-sa), which is the same expression with
+            * a fully opaque source: blend_chan caps it at 255, where
+            * adding the terms by hand would overflow into the blue
+            * channel.
+            */
+           blend_chan(255u, dst & 0xffu, sa);
+}
+
+/* Write one pixel, ignoring anything outside the surface. */
+static void fb_put(struct session *s, int64_t x, int64_t y, uint32_t rgba)
+{
+    uint32_t *p;
+
+    if (x < 0 || y < 0 || x >= (int64_t)s->width || y >= (int64_t)s->height)
+        return;
+    p = &s->fb[(size_t)y * s->width + (size_t)x];
+    *p = blend_px(s, rgba, *p);
+}
 
 static void fb_fill_rect(struct session *s, uint32_t x, uint32_t y,
                          uint32_t w, uint32_t h, uint32_t rgba)
@@ -90,8 +144,87 @@ static void fb_fill_rect(struct session *s, uint32_t x, uint32_t y,
     if (h > s->height - y)
         h = s->height - y;
     for (uint32_t row = y; row < y + h; row++)
-        for (uint32_t col = x; col < x + w; col++)
-            s->fb[(size_t)row * s->width + col] = rgba;
+        for (uint32_t col = x; col < x + w; col++) {
+            uint32_t *p = &s->fb[(size_t)row * s->width + col];
+
+            *p = blend_px(s, rgba, *p);
+        }
+}
+
+/* Bresenham, clipped per pixel rather than up front: the endpoints may sit
+ * far outside the surface and the loop is cheap enough not to care. */
+static void fb_line(struct session *s, const struct rproto_draw_line *m)
+{
+    int64_t x0 = m->x0, y0 = m->y0;
+    int64_t dx = llabs((long long)m->x1 - m->x0);
+    int64_t dy = -llabs((long long)m->y1 - m->y0);
+    int64_t sx = m->x0 < m->x1 ? 1 : -1;
+    int64_t sy = m->y0 < m->y1 ? 1 : -1;
+    int64_t err = dx + dy;
+
+    for (;;) {
+        fb_put(s, x0, y0, m->rgba);
+        if (x0 == m->x1 && y0 == m->y1)
+            break;
+        int64_t e2 = 2 * err;
+
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/* Edge function: twice the signed area of the triangle (a, b, p). */
+static int64_t edge(int64_t ax, int64_t ay, int64_t bx, int64_t by,
+                    int64_t px, int64_t py)
+{
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+/*
+ * Filled triangle by edge functions over the bounding box, clipped to the
+ * surface. Either winding is accepted: the sign of the doubled area picks
+ * which way "inside" points.
+ */
+static void fb_triangle(struct session *s, const struct rproto_draw_triangle *m)
+{
+    int64_t x0 = m->x0, y0 = m->y0, x1 = m->x1, y1 = m->y1;
+    int64_t x2 = m->x2, y2 = m->y2;
+    int64_t area = edge(x0, y0, x1, y1, x2, y2);
+    int64_t minx, maxx, miny, maxy;
+    int sign;
+
+    if (area == 0)
+        return; /* degenerate: no interior to fill */
+    sign = area > 0 ? 1 : -1;
+
+    minx = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+    maxx = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+    miny = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    maxy = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+    if (minx < 0)
+        minx = 0;
+    if (miny < 0)
+        miny = 0;
+    if (maxx > (int64_t)s->width - 1)
+        maxx = (int64_t)s->width - 1;
+    if (maxy > (int64_t)s->height - 1)
+        maxy = (int64_t)s->height - 1;
+
+    for (int64_t py = miny; py <= maxy; py++)
+        for (int64_t px = minx; px <= maxx; px++) {
+            int64_t w0 = edge(x1, y1, x2, y2, px, py) * sign;
+            int64_t w1 = edge(x2, y2, x0, y0, px, py) * sign;
+            int64_t w2 = edge(x0, y0, x1, y1, px, py) * sign;
+
+            if (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                fb_put(s, px, py, m->rgba);
+        }
 }
 
 /*
@@ -115,9 +248,12 @@ static void fb_blit(struct session *s, const struct rproto_blit *m)
         const uint8_t *sp = src + (size_t)row * m->stride;
         uint32_t *dp = s->fb + (size_t)(m->y + row) * s->width + m->x;
 
-        for (uint32_t col = 0; col < w; col++, sp += 4)
-            dp[col] = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) |
-                      ((uint32_t)sp[2] << 8) | (uint32_t)sp[3];
+        for (uint32_t col = 0; col < w; col++, sp += 4) {
+            uint32_t src = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) |
+                           ((uint32_t)sp[2] << 8) | (uint32_t)sp[3];
+
+            dp[col] = blend_px(s, src, dp[col]);
+        }
     }
 }
 
@@ -190,6 +326,9 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
             return RPROTO_ST_ERR_STATE;
         if (rproto_dec_clear(payload, hdr->payload_len, &m) < 0)
             return RPROTO_ST_ERR_PROTO;
+        /* CLEAR resets the surface, so it overwrites regardless of the
+         * blend mode — compositing onto what you are clearing is not a
+         * thing anyone means. */
         for (size_t i = 0; i < (size_t)s->width * s->height; i++)
             s->fb[i] = m.rgba;
         return RPROTO_ST_OK;
@@ -229,6 +368,38 @@ static uint32_t handle_msg(struct session *s, const struct rproto_hdr *hdr,
         if ((uint64_t)m.src_off + extent > s->io->staging_size)
             return RPROTO_ST_ERR_ARG;
         fb_blit(s, &m);
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_SET_BLEND: {
+        struct rproto_set_blend m;
+
+        if (!s->hello_done)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_set_blend(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        if (m.mode != RPROTO_BLEND_REPLACE && m.mode != RPROTO_BLEND_SRC_OVER)
+            return RPROTO_ST_ERR_ARG;
+        s->blend = m.mode;
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_DRAW_LINE: {
+        struct rproto_draw_line m;
+
+        if (!s->fb)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_draw_line(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        fb_line(s, &m);
+        return RPROTO_ST_OK;
+    }
+    case RPROTO_MSG_DRAW_TRIANGLE: {
+        struct rproto_draw_triangle m;
+
+        if (!s->fb)
+            return RPROTO_ST_ERR_STATE;
+        if (rproto_dec_draw_triangle(payload, hdr->payload_len, &m) < 0)
+            return RPROTO_ST_ERR_PROTO;
+        fb_triangle(s, &m);
         return RPROTO_ST_OK;
     }
     case RPROTO_MSG_PRESENT: {
@@ -341,6 +512,20 @@ static int shm_send(void *ctx, uint32_t type, uint32_t seq,
                             -1, io->notifier);
 
     return r == 0 ? 0 : -1;
+}
+
+/* Phase 4: the vring itself carries request and reply, so the pair maps
+ * straight onto the transport callbacks. */
+static int vu_io_recv(void *ctx, struct rproto_hdr *hdr, uint8_t *payload,
+                      uint32_t cap)
+{
+    return vu_recv(ctx, hdr, payload, cap);
+}
+
+static int vu_io_send(void *ctx, uint32_t type, uint32_t seq,
+                      const uint8_t *payload, uint32_t payload_len)
+{
+    return vu_send_reply(ctx, type, seq, payload, payload_len);
 }
 
 /* Phase 3 notification, backed by the ivshmem server's eventfds. */
@@ -477,7 +662,8 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: renderd (--unix PATH | --vsock PORT | --tcp PORT |"
-            " --shm FILE | --ivshmem SOCKET) [--out DIR] [--once]\n");
+            " --shm FILE | --ivshmem SOCKET | --vhost-user SOCKET)"
+            " [--out DIR] [--once]\n");
 }
 
 int main(int argc, char **argv)
@@ -485,6 +671,7 @@ int main(int argc, char **argv)
     const char *unix_path = NULL;
     const char *shm_path = NULL;
     const char *ivshmem_path = NULL;
+    const char *vhost_user_path = NULL;
     long vsock_port = -1;
     long tcp_port = -1;
     int once = 0;
@@ -501,6 +688,8 @@ int main(int argc, char **argv)
             shm_path = argv[++i];
         } else if (strcmp(argv[i], "--ivshmem") == 0 && i + 1 < argc) {
             ivshmem_path = argv[++i];
+        } else if (strcmp(argv[i], "--vhost-user") == 0 && i + 1 < argc) {
+            vhost_user_path = argv[++i];
         } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             g_outdir = argv[++i];
         } else if (strcmp(argv[i], "--once") == 0) {
@@ -511,7 +700,8 @@ int main(int argc, char **argv)
         }
     }
     if ((unix_path != NULL) + (vsock_port >= 0) + (tcp_port >= 0) +
-            (shm_path != NULL) + (ivshmem_path != NULL) != 1) {
+            (shm_path != NULL) + (ivshmem_path != NULL) +
+            (vhost_user_path != NULL) != 1) {
         usage();
         return 2;
     }
@@ -542,6 +732,25 @@ int main(int argc, char **argv)
             fprintf(stderr, "renderd: shm session ended\n");
             rshm_reset_rings(&shm);
         } while (!once);
+        return 0;
+    }
+
+    if (vhost_user_path) {
+        static struct vu_dev vu;
+        struct rio io = { .recv = vu_io_recv, .send = vu_io_send, .ctx = &vu };
+
+        if (vu_listen(&vu, vhost_user_path) < 0) {
+            fprintf(stderr, "renderd: cannot listen on %s\n", vhost_user_path);
+            return 1;
+        }
+        fprintf(stderr, "renderd: vhost-user backend on %s\n",
+                vhost_user_path);
+        do {
+            serve(&io);
+            fprintf(stderr, "renderd: vhost-user session ended\n");
+        } while (!once);
+        vu_close(&vu);
+        unlink(vhost_user_path);
         return 0;
     }
 

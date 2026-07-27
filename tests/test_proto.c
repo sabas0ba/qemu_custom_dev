@@ -160,6 +160,39 @@ static void test_blit_roundtrip(void)
     CHECK(rproto_dec_blit(buf, RPROTO_LEN_BLIT + 1, &out) == -1);
 }
 
+static void test_v03_roundtrips(void)
+{
+    uint8_t buf[RPROTO_LEN_DRAW_TRIANGLE];
+    struct rproto_set_blend bin = { .mode = RPROTO_BLEND_SRC_OVER }, bout;
+    /* negative coordinates must survive the u32 wire slots intact */
+    struct rproto_draw_line lin = { .x0 = -5, .y0 = 7, .x1 = 400, .y1 = -300,
+                                    .rgba = 0x11223344 };
+    struct rproto_draw_line lout;
+    struct rproto_draw_triangle tin = { .x0 = -1, .y0 = -2, .x1 = 3, .y1 = 4,
+                                        .x2 = -5, .y2 = 6,
+                                        .rgba = 0xaabbccdd };
+    struct rproto_draw_triangle tout;
+
+    CHECK(rproto_enc_set_blend(buf, &bin) == RPROTO_LEN_SET_BLEND);
+    CHECK(rproto_dec_set_blend(buf, RPROTO_LEN_SET_BLEND, &bout) == 0);
+    CHECK(bout.mode == RPROTO_BLEND_SRC_OVER);
+    CHECK(rproto_dec_set_blend(buf, RPROTO_LEN_SET_BLEND + 1, &bout) == -1);
+
+    CHECK(rproto_enc_draw_line(buf, &lin) == RPROTO_LEN_DRAW_LINE);
+    CHECK(rproto_dec_draw_line(buf, RPROTO_LEN_DRAW_LINE, &lout) == 0);
+    CHECK(lout.x0 == -5 && lout.y0 == 7);
+    CHECK(lout.x1 == 400 && lout.y1 == -300);
+    CHECK(lout.rgba == 0x11223344);
+    CHECK(rproto_dec_draw_line(buf, RPROTO_LEN_DRAW_LINE - 1, &lout) == -1);
+
+    CHECK(rproto_enc_draw_triangle(buf, &tin) == RPROTO_LEN_DRAW_TRIANGLE);
+    CHECK(rproto_dec_draw_triangle(buf, RPROTO_LEN_DRAW_TRIANGLE, &tout) == 0);
+    CHECK(tout.x0 == -1 && tout.y0 == -2 && tout.x1 == 3);
+    CHECK(tout.y1 == 4 && tout.x2 == -5 && tout.y2 == 6);
+    CHECK(tout.rgba == 0xaabbccdd);
+    CHECK(rproto_dec_draw_triangle(buf, 0, &tout) == -1);
+}
+
 int main(void)
 {
     test_hdr_roundtrip();
@@ -172,6 +205,7 @@ int main(void)
     test_fill_rect_roundtrip();
     test_present_status_roundtrip();
     test_blit_roundtrip();
+    test_v03_roundtrips();
 
     if (g_failures) {
         fprintf(stderr, "test_proto: %d failure(s)\n", g_failures);
