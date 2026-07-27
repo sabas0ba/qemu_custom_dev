@@ -67,9 +67,10 @@ host/           ホストデーモン renderd（vhost-user バックエンドを
 guest/user/     ゲスト側クライアントライブラリ、デモ、ベンチマーク
 guest/kmod/     ゲストカーネルモジュール（Phase 3 / 4）と、そのユーザ空間 API
 scripts/        QEMU 起動・ゲストイメージ生成・モジュールビルドの各スクリプト
-containers/     カーネルモジュールビルド用コンテナ定義
+containers/     コンテナ定義（開発環境一式 / モジュールビルド用）
+tools/          補助ツール（PPM→PNG 変換器）
 tests/          単体テストと E2E テスト
-docs/           仕様・設計資料
+docs/           仕様・設計資料と、その中で使う実出力画像
 .tmp/           gitignore 対象の作業ディレクトリ
 ```
 
@@ -90,6 +91,12 @@ renderd への描画を無人で検証する（CI で毎 PR 実行）。カー�
 2 本の経路と、3 Phase のレイテンシ比較を含む。`/dev/vhost-vsock` がある
 環境では vsock 輸送も検証する。
 
+**描画結果は CI のアーティファクトとして落とせる**。各ジョブが出力
+フレームを PNG に変換して `frames-host` / `frames-guest` という名前で
+アップロードするので、Actions の run ページからそのまま見られる
+（失敗した run でもアップロードされる。ゲスト側はコンソールログも
+一緒に入るので、ブートがこけたときの調査に使える）。
+
 ## 使ってみる
 
 ### 1. QEMU なしで動かす（いちばん手軽）
@@ -104,10 +111,35 @@ $ build/demo --unix .tmp/r.sock --rich
 ```
 
 `.tmp/frames/frame-000001.ppm` に描画結果が出る。`--rich` は v0.3 の
-線・三角形・アルファ合成を使うシーン（描画内容は
-[docs/renderer.md](docs/renderer.md)）。
+線・三角形・アルファ合成を使うシーン:
+
+![v0.3 シーン](docs/images/scene-rich.png)
+
+`--rich` なしだと矩形 2 枚だけの基準シーンになる（全輸送のテストが
+ピクセルを照合している方）。両方の画像と描画内容は
+[docs/renderer.md](docs/renderer.md#期待される出力)。
+
+PPM はブラウザで開けないので、見るときは `build/ppm2png` で PNG に
+変換する（`scripts/frames-to-png.sh .tmp/frames` でまとめて変換）。
 
 ### 2. ゲストから動かす
+
+ゲストを動かすには QEMU・ゲスト用カーネルヘッダ・ISO ツールが要る。
+**ホストに入れたくない場合はコンテナを使う**（CI が使っているのと同じ
+パッケージ構成。詳細は [containers/README.md](containers/README.md)）:
+
+```console
+$ scripts/dev-container.sh                   # 対話シェル
+$ scripts/dev-container.sh make test         # ビルドしてテスト
+$ scripts/dev-container.sh tests/vm-e2e.sh   # ゲストをブートして全 Phase
+```
+
+リポジトリだけをマウントし、呼び出したユーザ権限で動くので、ホスト側に
+残るのは `build/` と `.tmp/` だけ。`/dev/kvm` があれば自動で渡す（無くても
+TCG で動く、遅いだけ）。以降のコマンドはコンテナの中でも外でも同じ。
+
+自分の環境に直接入れる場合に必要なパッケージは
+`containers/dev.Dockerfile` にそのまま並んでいる。
 
 まずゲストイメージを 1 度だけ作る。Ubuntu 24.04 cloud image を
 SHA256 固定で取得し、cloud-init で自動構築する（詳細と決定事項は
@@ -168,7 +200,8 @@ $ tests/vm-e2e.sh
 ゲストを 3 回ブートし、上の Phase 1〜4 を無人で一通り実行して、出力
 フレームのピクセルまで検証する。ホスト側の準備（デーモン起動、モジュール
 ビルド、イメージ生成）も全部この中でやるので、まず動くところを見たい
-場合はこれが早い。
+場合はこれが早い。ホストを汚したくなければ
+`scripts/dev-container.sh tests/vm-e2e.sh`。
 
 ### 4. 自分のクライアントから使う
 

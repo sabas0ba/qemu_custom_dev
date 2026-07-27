@@ -15,7 +15,7 @@ PROTO_HDRS := proto/rproto.h proto/rproto_shm.h
 
 BINS := $(BUILD)/renderd $(BUILD)/ivshmemd $(BUILD)/demo $(BUILD)/bench \
 	$(BUILD)/test_proto $(BUILD)/test_shm $(BUILD)/ivshmem_peer \
-	$(BUILD)/ppm_check
+	$(BUILD)/ppm_check $(BUILD)/ppm2png
 
 RENDERD_SRCS := host/renderd.c host/ivshmem.c host/vhost_user.c $(PROTO_SRCS)
 CLIENT_SRCS  := guest/user/render_client.c $(PROTO_SRCS)
@@ -66,6 +66,9 @@ $(BUILD)/ivshmem_peer: tests/ivshmem_peer.c host/ivshmem.c $(CLIENT_SRCS) \
 
 $(BUILD)/ppm_check: tests/ppm_check.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/ppm_check.c
+
+$(BUILD)/ppm2png: tools/ppm2png.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/ppm2png.c
 
 test: all
 	$(BUILD)/test_proto
